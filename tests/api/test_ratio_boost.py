@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlmodel import select
 
 from movieclaw_api.services.ratio_boost import (
     _EMA_WINDOW_SECONDS,
@@ -244,6 +245,24 @@ class TestApplyObservation:
         later = _NOW + timedelta(seconds=300)
         apply_observation(task, uploaded_bytes=None, completed=True, now=later)
         assert task.completed_at == _NOW
+
+    def test_downloaded_bytes_recorded_and_none_safe(self) -> None:
+        """下载量入台账（带宽成本，任务删除后 qb 里就没了）；
+        None（旧适配器不提供）绝不能当 0 把已有账目清掉。"""
+        task = _task(downloaded_bytes=500)
+        task.last_checked_at = _NOW - timedelta(seconds=300)
+        apply_observation(
+            task, uploaded_bytes=None, completed=True, now=_NOW, downloaded_bytes=800
+        )
+        assert task.downloaded_bytes == 800
+        apply_observation(
+            task,
+            uploaded_bytes=None,
+            completed=True,
+            now=_NOW + timedelta(seconds=300),
+            downloaded_bytes=None,
+        )
+        assert task.downloaded_bytes == 800
 
 
 # ---------------------------------------------------------------------------
@@ -644,8 +663,12 @@ async def test_reclaim_move_failure_keeps_boost_ownership(db) -> None:
 @pytest.mark.asyncio
 async def test_hourly_buckets_accumulate_and_windows_aggregate(db) -> None:
     """同一小时内多个 tick 累进同一桶；窗口聚合给出上传量与平均在池体积。"""
-    from movieclaw_api.services.ratio_boost import _record_stats, collect_boost_stats
-    from movieclaw_db.models import AuthType, SiteCredential, utcnow
+    from movieclaw_api.services.ratio_boost import (
+        _record_stats,
+        _SiteTickObs,
+        collect_boost_stats,
+    )
+    from movieclaw_db.models import AuthType, RatioBoostStat, SiteCredential, utcnow
 
     now = utcnow()
     async with db.session() as session:
@@ -657,9 +680,23 @@ async def test_hourly_buckets_accumulate_and_windows_aggregate(db) -> None:
         # 两个 tick：上传 3 GiB + 1 GiB，在池占用恒为 40 GiB
         for gained in (3 * _GIB, 1 * _GIB):
             await _record_stats(
-                session, deltas={"demo": gained}, used_by_site={"demo": 40 * _GIB}, now=now
+                session,
+                deltas={
+                    "demo": _SiteTickObs(
+                        uploaded_delta=gained,
+                        downloaded_delta=2 * _GIB,
+                        upspeed_sum=1_000_000,
+                        dlspeed_sum=5_000_000,
+                        downloading_count=3,
+                    )
+                },
+                used_by_site={"demo": 40 * _GIB},
+                now=now,
             )
         stats = await collect_boost_stats(session)
+        bucket = (
+            await session.execute(select(RatioBoostStat))
+        ).scalars().one()
 
     view = stats["demo"]
     assert view.uploaded_bytes_24h == 4 * _GIB
@@ -667,6 +704,105 @@ async def test_hourly_buckets_accumulate_and_windows_aggregate(db) -> None:
     # 7 天窗口包含 24 小时窗口的数据
     assert view.uploaded_bytes_7d == 4 * _GIB
     assert view.avg_used_bytes_7d == 40 * _GIB
+    # 新增的带宽收支与采样列同样按 tick 累进（平均值 = sum / tick_count）
+    assert bucket.downloaded_bytes == 4 * _GIB
+    assert bucket.upspeed_bytes_sum == 2_000_000
+    assert bucket.dlspeed_bytes_sum == 10_000_000
+    assert bucket.downloading_count_sum == 6
+    assert bucket.tick_count == 2
+
+
+@pytest.mark.asyncio
+async def test_task_samples_upsert_within_hour(db) -> None:
+    """每任务小时采样：同一小时后写覆盖先写（行值 = 该小时最后一次观测的
+    累计量），跨小时另起新桶——相邻桶差分即得产出曲线。"""
+    from movieclaw_api.services.ratio_boost import _record_task_samples
+    from movieclaw_db.models import RatioBoostTaskSample, utcnow
+
+    now = utcnow().replace(minute=10)
+    # downloader_id 置空：测试库没有下载器配置行，采样逻辑也不依赖它
+    task = _task(downloader_id=None)
+    async with db.session() as session:
+        session.add(task)
+        await session.commit()
+
+        # 每次采样后提交，模拟真实的 tick 边界（引擎在对账末尾统一 commit）
+        task.uploaded_bytes = 100
+        task.downloaded_bytes = 1000
+        task.swarm_leechers = 50
+        await _record_task_samples(session, [task], now)
+        await session.commit()
+        # 同一小时 20 分钟后：覆盖同一桶
+        task.uploaded_bytes = 300
+        await _record_task_samples(session, [task], now + timedelta(minutes=20))
+        await session.commit()
+        # 下一个小时：另起新桶
+        task.uploaded_bytes = 700
+        await _record_task_samples(session, [task], now + timedelta(hours=1))
+        await session.commit()
+
+        samples = (
+            (
+                await session.execute(
+                    select(RatioBoostTaskSample).order_by(
+                        RatioBoostTaskSample.bucket_start  # type: ignore[arg-type]
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert [s.uploaded_bytes for s in samples] == [300, 700]
+    assert samples[0].downloaded_bytes == 1000
+    assert samples[0].swarm_leechers == 50
+
+
+@pytest.mark.asyncio
+async def test_swarm_samples_capture_fresh_torrents(db) -> None:
+    """候选控制组采样：发布 48h 内且观测到 S/L 的种子入小时桶（无论刷流
+    收不收），同一小时覆盖不重复；旧种/无 S/L 观测的不采。"""
+    from movieclaw_db.models import SiteTorrentSwarmSample, utcnow
+    from movieclaw_db.repositories.torrent_repo import (
+        TorrentObservation,
+        TorrentRepository,
+    )
+
+    now = utcnow()
+
+    def obs(torrent_id: str, *, publish_age: timedelta, seeders: int | None) -> TorrentObservation:
+        return TorrentObservation(
+            site_id="demo",
+            torrent_id=torrent_id,
+            title=f"种子{torrent_id}",
+            source=TorrentSource.LIST,
+            publish_time=now - publish_age,
+            seeders=seeders,
+            leechers=30,
+            download_volume_factor=0.0,
+        )
+
+    async with db.session() as session:
+        repo = TorrentRepository(session)
+        await repo.bulk_upsert(
+            [
+                obs("fresh", publish_age=timedelta(hours=2), seeders=5),
+                obs("stale", publish_age=timedelta(days=3), seeders=5),
+            ]
+        )
+        # 同一小时内复看：seeders 演化，覆盖同一桶而非新增行
+        await repo.bulk_upsert([obs("fresh", publish_age=timedelta(hours=2), seeders=9)])
+
+        samples = (
+            (await session.execute(select(SiteTorrentSwarmSample))).scalars().all()
+        )
+
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample.torrent_id == "fresh"
+    assert sample.seeders == 9
+    assert sample.leechers == 30
+    assert sample.is_free is True
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -24,6 +24,12 @@ from movieclaw_db.models.site_torrent import (
     SiteTorrent,
     TorrentSource,
 )
+from movieclaw_db.models.site_torrent_swarm_sample import SiteTorrentSwarmSample
+
+# 蜂群演化采样（刷流候选控制组，见 SiteTorrentSwarmSample）的参数：
+# 只采发布 48 小时内的新种（衰减曲线的关键段），30 天保留后顺手清理
+_SWARM_SAMPLE_WINDOW = timedelta(hours=48)
+_SWARM_SAMPLE_RETENTION = timedelta(days=30)
 
 
 class TorrentObservation(BaseModel):
@@ -289,16 +295,75 @@ class TorrentRepository:
                 for row in result.scalars().all():
                     existing[(row.site_id, row.torrent_id)] = row
 
+        merged: list[tuple[TorrentObservation, SiteTorrent]] = []
         for obs in unique:
             row = existing.get((obs.site_id, obs.torrent_id))
             if row is None:
-                self._session.add(self._build_new(obs))
+                row = self._build_new(obs)
+                self._session.add(row)
                 stats.inserted += 1
             else:
                 self._merge_into(row, obs)
                 stats.updated += 1
+            merged.append((obs, row))
+        await self._record_swarm_samples(merged)
         await self._session.commit()
         return stats
+
+    async def _record_swarm_samples(
+        self, merged: list[tuple[TorrentObservation, SiteTorrent]]
+    ) -> None:
+        """把本批观测里新种的蜂群规模落进小时采样表（刷流候选控制组）。
+
+        采样条件：发布 48 小时内 + 本次观测到 seeders/leechers 任一。免费与否
+        不过滤（is_free 三态入列，付费对照本身是回测素材）。同一小时桶后写
+        覆盖先写（行值 = 该小时最后一次观测），顺手清理超保留期的旧桶。
+        与 bulk_upsert 同一事务提交，不额外增加落盘次数。
+        """
+        now = utcnow()
+        eligible = [
+            (obs, row)
+            for obs, row in merged
+            if row.publish_time is not None
+            and now - row.publish_time <= _SWARM_SAMPLE_WINDOW
+            and (obs.seeders is not None or obs.leechers is not None)
+        ]
+        if not eligible:
+            return
+        bucket = now.replace(minute=0, second=0, microsecond=0)
+        torrent_ids = sorted({obs.torrent_id for obs, _ in eligible})
+        samples: dict[tuple[str, str], SiteTorrentSwarmSample] = {}
+        # 与 bulk_upsert 同款 900 分批，兼容 SQLite 绑定参数上限
+        for offset in range(0, len(torrent_ids), 900):
+            rows = (
+                await self._session.execute(
+                    select(SiteTorrentSwarmSample).where(
+                        SiteTorrentSwarmSample.bucket_start == bucket,
+                        SiteTorrentSwarmSample.torrent_id.in_(  # type: ignore[attr-defined]
+                            torrent_ids[offset : offset + 900]
+                        ),
+                    )
+                )
+            ).scalars()
+            samples.update({(s.site_id, s.torrent_id): s for s in rows})
+        for obs, row in eligible:
+            sample = samples.get((obs.site_id, obs.torrent_id))
+            if sample is None:
+                sample = SiteTorrentSwarmSample(
+                    site_id=obs.site_id, torrent_id=obs.torrent_id, bucket_start=bucket
+                )
+                self._session.add(sample)
+                samples[(obs.site_id, obs.torrent_id)] = sample
+            sample.seeders = obs.seeders
+            sample.leechers = obs.leechers
+            sample.is_free = row.is_free
+            sample.updated_at = now
+        await self._session.execute(
+            delete(SiteTorrentSwarmSample).where(
+                SiteTorrentSwarmSample.bucket_start  # type: ignore[arg-type]
+                < now - _SWARM_SAMPLE_RETENTION
+            )
+        )
 
     def _build_new(self, obs: TorrentObservation) -> SiteTorrent:
         """由观测构造一条全新的 SiteTorrent（首次入库）。"""

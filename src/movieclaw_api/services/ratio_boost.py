@@ -30,6 +30,7 @@ import contextlib
 import logging
 import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import case, delete, func, or_
@@ -43,6 +44,7 @@ from movieclaw_db.models import (
     ManualDownloadIntent,
     RatioBoostStat,
     RatioBoostTask,
+    RatioBoostTaskSample,
     SiteCredential,
     SiteTorrent,
     SubscriptionDownloadAttempt,
@@ -220,11 +222,12 @@ def apply_observation(
     now: datetime,
     swarm_seeders: int | None = None,
     swarm_leechers: int | None = None,
+    downloaded_bytes: int | None = None,
 ) -> None:
     """把下载器的一次观测写回台账：完成位 + 上传量差分 → 上传速度 EMA。
 
-    uploaded_bytes 为 None（旧适配器不提供）时只更新完成位，绝不能当 0
-    参与差分——会把 EMA 错误打到 0 触发误汰换。
+    uploaded_bytes / downloaded_bytes 为 None（旧适配器不提供）时只更新
+    完成位，绝不能当 0 参与差分——会把 EMA 错误打到 0 触发误汰换。
     差分为负说明下载器重建过任务（重新校验/换实例），重置基线不更新 EMA。
     """
     if completed and not task.completed:
@@ -241,6 +244,9 @@ def apply_observation(
             alpha = 1 - math.exp(-dt / _EMA_WINDOW_SECONDS)
             task.upload_rate_ema = alpha * rate + (1 - alpha) * task.upload_rate_ema
         task.uploaded_bytes = max(uploaded_bytes, 0)
+    if downloaded_bytes is not None:
+        # 下载量只记账不参与 EMA：它是带宽成本台账（任务删除后 qb 里就没了）
+        task.downloaded_bytes = max(downloaded_bytes, 0)
     # 蜂群快照只在下载器有汇报时覆盖（None 保留上次已知值，不可当 0）
     if swarm_seeders is not None:
         task.swarm_seeders = swarm_seeders
@@ -538,16 +544,32 @@ async def _claimed_hashes(session: AsyncSession) -> set[str]:
     return {h.lower() for h in [*attempt_rows, *intent_rows] if h}
 
 
+@dataclass
+class _SiteTickObs:
+    """一 tick 内某站点刷流任务的聚合观测，喂给小时桶统计。
+
+    增量是差分口径（与效率 EMA 同源）；速度与在下任务数是本 tick 的采样值，
+    小时桶里累加后除以 tick_count 即时间平均。
+    """
+
+    uploaded_delta: int = 0
+    downloaded_delta: int = 0
+    upspeed_sum: int = 0
+    dlspeed_sum: int = 0
+    downloading_count: int = 0
+
+
 async def _refresh_tasks(
     session: AsyncSession, pool: _DownloaderPool, tasks: list[RatioBoostTask], now: datetime
-) -> dict[str, int]:
+) -> dict[str, _SiteTickObs]:
     """第一步对账：把下载器观测写回台账，找不到的标记 missing。
-    返回本 tick 各站点的上传增量（site_id → 字节），供小时桶统计累加。
+    返回本 tick 各站点的聚合观测（site_id → _SiteTickObs），供小时桶统计累加。
 
     对账前先做认领转出（见 hand_over_if_claimed）：被订阅/手动下载认领的
     任务立即脱离刷流管理，从根上杜绝后续任何汰换触碰它的数据。
     """
-    deltas: dict[str, int] = {}
+    deltas: dict[str, _SiteTickObs] = {}
+    observed: list[RatioBoostTask] = []
     claimed = await _claimed_hashes(session)
     for task in tasks:
         if hand_over_if_claimed(task, claimed, now):
@@ -572,6 +594,7 @@ async def _refresh_tasks(
             logger.info("刷流任务失踪，让出预算：%s（%s）", task.title, task.site_id)
             continue
         uploaded_before = task.uploaded_bytes
+        downloaded_before = task.downloaded_bytes
         apply_observation(
             task,
             uploaded_bytes=brief.uploaded_bytes,
@@ -579,19 +602,63 @@ async def _refresh_tasks(
             now=now,
             swarm_seeders=brief.swarm_seeders,
             swarm_leechers=brief.swarm_leechers,
+            downloaded_bytes=brief.downloaded_bytes,
         )
-        # 上传增量按站点归集（下载器重建导致的负差分已在 apply_observation 归零基线）
-        gained = max(0, task.uploaded_bytes - uploaded_before)
-        if gained:
-            deltas[task.site_id] = deltas.get(task.site_id, 0) + gained
+        observed.append(task)
+        # 增量按站点归集（下载器重建导致的负差分已在 apply_observation 归零基线）
+        obs = deltas.setdefault(task.site_id, _SiteTickObs())
+        obs.uploaded_delta += max(0, task.uploaded_bytes - uploaded_before)
+        obs.downloaded_delta += max(0, task.downloaded_bytes - downloaded_before)
+        obs.upspeed_sum += brief.upspeed_bytes or 0
+        obs.dlspeed_sum += brief.dlspeed_bytes or 0
+        if not task.completed:
+            obs.downloading_count += 1
         # 未完成任务的止损：免费窗口过期 / 长期卡死或排队 → 连数据删除，让出预算
         reason = stop_loss_reason(
             task, brief.progress or 0.0, now, queued=brief.state == "queued"
         )
         if reason is not None:
             await _evict(pool, task, now, reason=reason)
+    await _record_task_samples(session, observed, now)
     await session.commit()
     return deltas
+
+
+async def _record_task_samples(
+    session: AsyncSession, tasks: list[RatioBoostTask], now: datetime
+) -> None:
+    """把本 tick 有观测的任务累计值落进小时采样表（同一小时后写覆盖先写）。
+
+    行值始终是该小时最后一次观测的累计量，相邻桶差分即得小时产出曲线——
+    台账只有"最新累计值"，回答不了衰减形状/汰换时点这类曲线问题。
+    只采有真实观测的任务（下载器不可达/失踪的不采，避免把旧值当新样本）。
+    """
+    if not tasks:
+        return
+    bucket = now.replace(minute=0, second=0, microsecond=0)
+    task_ids = [t.id for t in tasks if t.id is not None]
+    rows = (
+        await session.execute(
+            select(RatioBoostTaskSample).where(
+                RatioBoostTaskSample.bucket_start == bucket,
+                RatioBoostTaskSample.task_id.in_(task_ids),  # type: ignore[attr-defined]
+            )
+        )
+    ).scalars()
+    samples = {s.task_id: s for s in rows}
+    for task in tasks:
+        if task.id is None:
+            continue
+        sample = samples.get(task.id)
+        if sample is None:
+            sample = RatioBoostTaskSample(task_id=task.id, bucket_start=bucket)
+            session.add(sample)
+            samples[task.id] = sample
+        sample.uploaded_bytes = task.uploaded_bytes
+        sample.downloaded_bytes = task.downloaded_bytes
+        sample.swarm_seeders = task.swarm_seeders
+        sample.swarm_leechers = task.swarm_leechers
+        sample.updated_at = now
 
 
 async def _evict(pool: _DownloaderPool, task: RatioBoostTask, now: datetime, reason: str) -> bool:
@@ -649,20 +716,22 @@ def _boost_save_path(downloader: DownloaderClient) -> str | None:
 async def _record_stats(
     session: AsyncSession,
     *,
-    deltas: dict[str, int],
+    deltas: dict[str, _SiteTickObs],
     used_by_site: dict[str, int],
     now: datetime,
 ) -> None:
-    """把本 tick 的观测累进小时桶：上传增量 + 在池占用采样。
+    """把本 tick 的观测累进小时桶：上/下行增量、速度与在下任务数采样、
+    在池占用采样。
 
-    覆盖「有在池任务 ∪ 有上传增量」的站点——占用采样必须每 tick 都记
+    覆盖「有在池任务 ∪ 有观测增量」的站点——占用采样必须每 tick 都记
     （平均在池体积 = 采样和 / 采样数），不能只在有上传时记，否则安静时段
-    会把平均值虚高。顺手清理超过保留期的旧桶。
+    会把平均值虚高。顺手清理超过保留期的旧桶（含每任务小时采样表）。
     """
     sites = set(used_by_site) | set(deltas)
     if not sites:
         return
     bucket = now.replace(minute=0, second=0, microsecond=0)
+    empty = _SiteTickObs()
     for site_id in sites:
         row = (
             await session.execute(
@@ -675,13 +744,23 @@ async def _record_stats(
         if row is None:
             row = RatioBoostStat(site_id=site_id, bucket_start=bucket)
             session.add(row)
-        row.uploaded_bytes += deltas.get(site_id, 0)
+        obs = deltas.get(site_id, empty)
+        row.uploaded_bytes += obs.uploaded_delta
+        row.downloaded_bytes += obs.downloaded_delta
+        row.upspeed_bytes_sum += obs.upspeed_sum
+        row.dlspeed_bytes_sum += obs.dlspeed_sum
+        row.downloading_count_sum += obs.downloading_count
         row.used_bytes_sum += used_by_site.get(site_id, 0)
         row.tick_count += 1
         row.updated_at = now
     await session.execute(
         delete(RatioBoostStat).where(
             RatioBoostStat.bucket_start < now - _STAT_RETENTION  # type: ignore[arg-type]
+        )
+    )
+    await session.execute(
+        delete(RatioBoostTaskSample).where(
+            RatioBoostTaskSample.bucket_start < now - _STAT_RETENTION  # type: ignore[arg-type]
         )
     )
     await session.commit()
@@ -882,6 +961,12 @@ async def _admit_candidates(
             free_deadline=row.free_deadline,
             # 明确标注 H&R 的任务保留期按真实考核时长保底（见 evictable）
             hit_and_run=row.hit_and_run is True,
+            # 入场快照：准入瞬间的决策依据，此后永不覆盖——事后回归
+            # "什么入场特征预测高产出"、度量种龄（created_at - 发布时间）
+            entry_seeders=row.seeders,
+            entry_leechers=row.leechers,
+            entry_score=score,
+            torrent_published_at=row.publish_time,
         )
         session.add(task)
         await session.commit()
@@ -889,11 +974,13 @@ async def _admit_candidates(
         used += size
         admitted += 1
         logger.info(
-            "刷流已抢下免费种：%s（%s，%.1f GiB，评分 %.2f，已用 %.1f/%.1f GiB）",
+            "刷流已抢下免费种：%s（%s，%.1f GiB，评分 %.2f，蜂群 %s/%s，已用 %.1f/%.1f GiB）",
             row.title,
             site_id,
             size / 1024**3,
             score,
+            row.seeders if row.seeders is not None else "?",
+            row.leechers if row.leechers is not None else "?",
             used / 1024**3,
             budget / 1024**3,
         )

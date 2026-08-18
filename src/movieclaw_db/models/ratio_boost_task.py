@@ -75,8 +75,23 @@ class RatioBoostTask(TimestampMixin, table=True):
     # 准入时该种是否明确标注 H&R 考核：True 的任务保留期取
     # max(站点保留期, 站点 hr_seed_hours)——真实考核时长优先于保底配置
     hit_and_run: bool = Field(default=False, description="是否明确标注 H&R 考核")
+    # -- 入场快照（准入瞬间从索引抄录，此后永不覆盖）------------------------
+    # 与 swarm_seeders/leechers（每 tick 刷新的"最近观测"）不同，这组字段
+    # 冻结的是**决策依据**：事后才能回归"什么样的入场特征预测高产出"、
+    # 评估准入策略本身的好坏。NULL=历史任务（快照机制上线前入池）
+    entry_seeders: int | None = Field(default=None, description="入场时索引观测的做种数")
+    entry_leechers: int | None = Field(default=None, description="入场时索引观测的下载数")
+    entry_score: float | None = Field(default=None, description="准入评分（决策时的值）")
+    # 种子在站点的发布时间：created_at - torrent_published_at = 入场延迟
+    # （种龄），"上桌早晚"是刷流收益的一等因子，要能被度量
+    torrent_published_at: datetime | None = Field(
+        default=None, description="种子发布时间（入场快照）"
+    )
     # 最近观测的累计上传量；差分驱动 EMA 更新
     uploaded_bytes: int = Field(default=0, description="累计上传量（字节）")
+    # 最近观测的累计下载量（含重下块，可能略大于体积）：真实带宽成本台账，
+    # 任务被汰换/止损后收支仍有账可查（qb 里删了任务就再也拿不到这个数）
+    downloaded_bytes: int = Field(default=0, description="累计下载量（字节）")
     # 上传速度 EMA（字节/秒），汰换排序的依据
     upload_rate_ema: float = Field(default=0.0, description="上传速度 EMA（字节/秒）")
     last_checked_at: datetime | None = Field(

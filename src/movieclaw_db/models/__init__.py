@@ -38,6 +38,7 @@ from movieclaw_db.models.person import MediaItemPerson, Person
 from movieclaw_db.models.playback_state import PlaybackState
 from movieclaw_db.models.ratio_boost_stat import RatioBoostStat
 from movieclaw_db.models.ratio_boost_task import BoostTaskState, RatioBoostTask
+from movieclaw_db.models.ratio_boost_task_sample import RatioBoostTaskSample
 from movieclaw_db.models.rule_set import RuleSet
 from movieclaw_db.models.scheduled_task import (
     ScheduledTask,
@@ -53,6 +54,7 @@ from movieclaw_db.models.site_torrent import (
     SiteTorrent,
     TorrentSource,
 )
+from movieclaw_db.models.site_torrent_swarm_sample import SiteTorrentSwarmSample
 from movieclaw_db.models.site_user_profile import SiteUserProfile
 from movieclaw_db.models.subscription import (
     DownloadAttemptStatus,
@@ -115,6 +117,7 @@ __all__ = [
     "BoostTaskState",
     "RatioBoostStat",
     "RatioBoostTask",
+    "RatioBoostTaskSample",
     "RuleSet",
     "Subscription",
     "SubscriptionDownloadAttempt",
@@ -127,6 +130,7 @@ __all__ = [
     "SubscriptionActivity",
     "SearchHistory",
     "SiteTorrent",
+    "SiteTorrentSwarmSample",
     "SiteSyncCursor",
     "TorrentSource",
     "SiteUserProfile",

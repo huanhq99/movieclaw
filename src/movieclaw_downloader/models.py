@@ -149,6 +149,9 @@ class TorrentBrief(BaseModel):
     # None 表示旧适配器没有提供——消费方必须跳过该 tick，不能当 0 参与差分
     # （会把效率 EMA 错误地打到 0 而触发误汰换）。
     uploaded_bytes: int | None = None
+    # 累计下载量（含重下/废弃块，可能大于体积）：刷流的真实带宽成本台账。
+    # 与 completed_bytes（有效完成量）语义不同；None 同样表示未提供不可当 0
+    downloaded_bytes: int | None = None
     ratio: float | None = None
     # 蜂群规模（tracker 汇报的全网数字，非已连接 peer 数）：刷流汰换的第二
     # 信源——leechers=0 的死种可立即汰换。None=下载器未提供，不可当 0

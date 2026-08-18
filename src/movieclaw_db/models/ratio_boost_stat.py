@@ -31,5 +31,19 @@ class RatioBoostStat(TimestampMixin, table=True):
     # 小时对齐的桶起点（naive UTC，与全库时间约定一致）
     bucket_start: datetime = Field(index=True, description="小时桶起点（UTC 整点）")
     uploaded_bytes: int = Field(default=0, description="该小时的上传增量之和（字节）")
+    # 下载增量与速度/在下任务数采样：刷流的带宽收支与竞争观测。下载增量
+    # 揭示"这小时花了多少带宽成本"；速度采样和（除以 tick_count 得时间
+    # 平均）用于观察上/下行是否饱和——饱和时准入该收紧，这是自适应总闸
+    # 的数据来源；在下任务数采样揭示下载并发竞争（互相抢带宽拖慢上桌）
+    downloaded_bytes: int = Field(default=0, description="该小时的下载增量之和（字节）")
+    upspeed_bytes_sum: int = Field(
+        default=0, description="各 tick 上传速度采样值之和（字节/秒）"
+    )
+    dlspeed_bytes_sum: int = Field(
+        default=0, description="各 tick 下载速度采样值之和（字节/秒）"
+    )
+    downloading_count_sum: int = Field(
+        default=0, description="各 tick 在下（未完成）任务数采样值之和"
+    )
     used_bytes_sum: int = Field(default=0, description="各 tick 在池占用采样值之和（字节）")
     tick_count: int = Field(default=0, description="采样 tick 数；平均在池 = sum / count")

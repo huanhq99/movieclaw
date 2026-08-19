@@ -113,7 +113,8 @@ function StartupStatus({
         {failure ? (
           <>
             <h1 className="mt-2 text-title font-semibold text-[var(--text)]">工作台加载失败</h1>
-            <p className="mt-2 text-ui leading-relaxed text-[var(--text-muted)]">
+            {/* 部署出问题时这段报错是用户唯一能拿去求助的线索，PWA 下也必须可选可复制 */}
+            <p className="selectable mt-2 text-ui leading-relaxed text-[var(--text-muted)]">
               {failure.message}
             </p>
             <p className="mt-3 break-all rounded-lg bg-black/25 px-3 py-2 font-mono text-caption text-[var(--text-faint)]">

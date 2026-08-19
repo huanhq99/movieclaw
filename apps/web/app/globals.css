@@ -237,9 +237,21 @@ textarea,
    导航项、按钮、列表行，只会拖出一片蓝色选区和系统菜单，手感立刻「掉回
    网页」。原生 App 里这些控件文案本来就是选不中的。
 
-   做法是把外壳整体设为不可选，再把**真正值得复制的内容**逐类放开：输入
-   控件、Markdown 正文、代码块，以及显式挂了 .selectable 的文本（对话气泡、
-   系统日志、错误详情、剧情简介、字幕预览等）。
+   做法是把外壳整体设为不可选，再把**真正值得复制的内容**放开。放行清单按
+   「语义类别」写而不是逐个组件枚举——枚举永远漏，漏掉的那处就是用户复制
+   不出来的死角：
+   - 表单控件：输入框、文本域、可编辑区；
+   - 机器数据：code / pre / samp，以及全站 .font-mono——本项目里等宽字体
+     就是「路径 / 种子 ID / 文件哈希 / 代理地址」这类要粘到别处去的数据，
+     几十处散落在媒体库详情、下载器配置、导入规则、网络设置里；
+   - 正文容器：.markdown 与 .code-highlight；
+   - 显式标注：.selectable，给不带上述特征的正文用（对话气泡、系统日志、
+     剧情简介、字幕台词、加载失败页的报错等）。
+
+   为什么要这么宽：这是自部署的开源软件，大量用户在局域网 HTTP 下访问，
+   而 Clipboard API 只在安全上下文可用（见 components/copy-button.tsx 的
+   execCommand 回退），全站带复制按钮的地方也只有三处——「长按选中手动
+   复制」往往是用户最后的兜底手段，禁错一处就是真的拿不出来。
 
    两个限定条件缺一不可：
    - display-mode: standalone —— 只管「已安装成 App」的形态，浏览器里访问
@@ -266,7 +278,11 @@ textarea,
   :where(
     input,
     textarea,
-    [contenteditable="true"],
+    [contenteditable]:not([contenteditable="false"]),
+    code,
+    pre,
+    samp,
+    .font-mono,
     .markdown,
     .code-highlight,
     .selectable

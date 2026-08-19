@@ -238,7 +238,6 @@ export function TaskCenterView({
     (showActive && boostTasks.length > 0 ? 1 : 0) +
     (showHistory ? standaloneHistoricalJobs.length : 0);
   const failedSources = sources.filter((source) => source.status !== "active");
-  const healthySourceCount = sources.length - failedSources.length;
   const viewCounts: Partial<Record<TaskCenterViewName, number>> = {
     attention: attentionTotal,
     active: activeTotal,
@@ -262,37 +261,9 @@ export function TaskCenterView({
           </div>
         </header>
 
-        <div className="mt-4 flex min-h-10 flex-wrap items-center gap-x-3 gap-y-2 border-y border-white/[0.06] py-2.5 text-caption text-[var(--text-muted)]">
-          <span
-            className={`flex items-center gap-2 ${
-              failedSources.length > 0 || error ? "text-amber-200/80" : "text-white/50"
-            }`}
-          >
-            <span
-              className={`size-1.5 rounded-full ${
-                failedSources.length > 0 || error
-                  ? "bg-[var(--warn)]"
-                  : loading && refreshedAt == null
-                    ? "animate-pulse bg-[var(--info)]"
-                    : "bg-[var(--ok)]"
-              }`}
-            />
-            {failedSources.length > 0 || error
-              ? "自动更新部分异常"
-              : loading && refreshedAt == null
-                ? "正在同步任务"
-                : "自动更新正常"}
-          </span>
-          {sources.length > 0 && (
-            <>
-              <span aria-hidden="true" className="h-3 w-px bg-white/10" />
-              <span className={failedSources.length > 0 ? "text-amber-200/80" : "text-white/45"}>
-                下载器 {healthySourceCount}/{sources.length} 可用
-              </span>
-            </>
-          )}
-        </div>
-
+        {/* 一切正常时的"自动更新正常 / 下载器 N/N 可用"是纯噪音，占掉首屏一整条；
+            出问题时下面的 SourceWarning 会指名道姓说清哪个下载器怎么了并给出设置入口，
+            比一句"0/1 可用"信息量更大，所以这条状态条整体去掉，只保留告警 */}
         {(failedSources.length > 0 || error) && (
           <SourceWarning sources={failedSources} error={error} />
         )}

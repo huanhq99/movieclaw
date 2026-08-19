@@ -353,7 +353,6 @@ export function TaskCenterView({
             {activeDownloadGroups.map((group) => (
               <TaskTimelineItem
                 key={group.key}
-                label={`${group.title}的实时状态`}
                 tone={downloadGroupTimelineTone(group, ingestJobsByHash)}
               >
                 <DownloadTaskGroupFeed
@@ -369,8 +368,6 @@ export function TaskCenterView({
             {standaloneActiveJobs.map((job) => (
               <TaskTimelineItem
                 key={job.id}
-                time={formatClockTime(job.created_at)}
-                label={`${job.subject || job.job_type}的发起时间`}
                 tone={jobTimelineTone(job)}
               >
                 <ActiveJobFeedItem
@@ -567,14 +564,18 @@ function TaskTimelineSection({
   );
 }
 
+/**
+ * 时间轴条目。原本桌面端在最左预留一条 3.75rem 的时刻沟槽，结果整段内容被推离
+ * 左边界近 100px，与分组标题、上方的筛选标签全部错开；"现在"区的下载过程更没有
+ * 单一时刻，那一列直接是空白。
+ *
+ * 现在只保留圆点轨道：条目与分组标题左对齐，桌面与移动端缩进一致。需要显示时刻
+ * 的条目（历史记录）自己把时间排进内容里，避免为一列时间牺牲整段的对齐。
+ */
 function TaskTimelineItem({
-  time,
-  label,
   tone = "active",
   children,
 }: {
-  time?: string;
-  label: string;
   tone?: "active" | "waiting" | "success" | "cancelled";
   children: React.ReactNode;
 }) {
@@ -588,14 +589,7 @@ function TaskTimelineItem({
           ? "bg-white/20 text-white/60 ring-white/10"
           : "bg-[var(--info)] ring-[var(--info)]/30";
   return (
-    <div className="grid grid-cols-[3.75rem_1.5rem_minmax(0,1fr)] gap-x-2 last:[&_[data-timeline-line]]:hidden max-md:grid-cols-[1.25rem_minmax(0,1fr)] max-md:gap-x-2.5">
-      <span
-        aria-label={time ? label : undefined}
-        aria-hidden={time ? undefined : true}
-        className="tnum pt-2.5 text-right text-caption text-white/35 max-md:hidden"
-      >
-        {time}
-      </span>
+    <div className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-2 last:[&_[data-timeline-line]]:hidden max-md:grid-cols-[1.25rem_minmax(0,1fr)] max-md:gap-x-2.5">
       <span className="relative flex self-stretch justify-center" aria-hidden="true">
         <span
           className={`absolute top-[0.7rem] z-10 flex items-center justify-center rounded-full border-2 border-[#0b0f17] ring-2 ${
@@ -610,12 +604,7 @@ function TaskTimelineItem({
           className="absolute bottom-0 top-[1.65rem] w-px bg-white/[0.12]"
         />
       </span>
-      <div className="min-w-0 pb-4">
-        {time && (
-          <p className="tnum mb-1 hidden text-caption text-white/35 max-md:block">{time}</p>
-        )}
-        {children}
-      </div>
+      <div className="min-w-0 pb-4">{children}</div>
     </div>
   );
 }
@@ -825,10 +814,13 @@ function groupHistoricalJobs(jobs: JobView[]): HistoryDayGroup[] {
 
 function HistoricalJobFeedItem({
   job,
+  time,
   retrying,
   onRetry,
 }: {
   job: JobView;
+  /** 完成时刻。不再占用左侧独立列，跟摘要同行显示，让条目与分组标题左对齐。 */
+  time: string;
   retrying: boolean;
   onRetry: () => void;
 }) {
@@ -840,9 +832,12 @@ function HistoricalJobFeedItem({
           <h3 className="text-ui font-medium leading-5 text-white/78">
             <OverflowText>{historicalJobTitle(job)}</OverflowText>
           </h3>
-          <OverflowText lines={2} className="mt-1 text-caption leading-5 text-white/40">
-            {ingestDetail?.summary ?? historicalJobSummary(job)}
-          </OverflowText>
+          <div className="mt-1 flex min-w-0 items-baseline gap-2 text-caption leading-5 text-white/40">
+            <span className="tnum shrink-0 text-white/32">{time}</span>
+            <OverflowText lines={2} className="min-w-0 flex-1">
+              {ingestDetail?.summary ?? historicalJobSummary(job)}
+            </OverflowText>
+          </div>
           {ingestDetail && <IngestHistoryFiles detail={ingestDetail} />}
         </div>
         {job.status === "cancelled" && !isSystemCancelled(job) && (
@@ -909,26 +904,52 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
   const downSpeed = sum((t) => t.dlspeed_bytes);
   const uploaded = sum((t) => t.uploaded_bytes);
   const downloaded = sum((t) => t.completed_bytes);
+  // 刷流列表最想回答的是"现在哪些种子在出力"，所以按上行速度倒序，正在上传的
+  // 永远浮在最前；速度相同（绝大多数是 0）时用累计上传量兜底，让贡献大的靠前，
+  // 也让静默种子之间的顺序在刷新之间保持稳定。
+  const sorted = useMemo(
+    () =>
+      [...tasks].sort(
+        (a, b) =>
+          (b.upspeed_bytes ?? 0) - (a.upspeed_bytes ?? 0) ||
+          (b.uploaded_bytes ?? 0) - (a.uploaded_bytes ?? 0),
+      ),
+    [tasks],
+  );
 
   return (
     <section className="mt-3" aria-label="刷流做种">
       <details className="group border-b border-white/[0.07] py-3.5 last:border-b-0">
         <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 rounded-lg py-1 text-ui transition [&::-webkit-details-marker]:hidden">
           <span className="font-semibold text-[var(--accent)]">刷流做种</span>
-          <span className="tnum text-caption text-white/30">{tasks.length} 个种子</span>
-          {/* 实时汇总：速度是"现在"，总量是"战果"——都放头部，折叠时也一眼可见 */}
+          <span className="tnum text-caption text-white/60">{tasks.length} 个种子</span>
+          {/* 实时汇总：速度是"现在"，总量是"战果"——都放头部，折叠时也一眼可见。
+              上传走 --ok 绿（刷流的战果就是上传量），下载走 --info 蓝，数值带淡辉光
+              从灰色标签里跳出来；标签本身保持浅灰，让数字成为视觉焦点。 */}
           <span className="tnum flex flex-wrap items-center gap-x-3 text-caption text-white/45">
-            {upSpeed > 0 && <span>↑ {formatBytes(upSpeed)}/s</span>}
-            {downSpeed > 0 && <span>↓ {formatBytes(downSpeed)}/s</span>}
-            <span>已上传 {formatBytes(uploaded)}</span>
-            <span>已下载 {formatBytes(downloaded)}</span>
+            {upSpeed > 0 && (
+              <span className="font-semibold text-[var(--ok)] drop-shadow-[0_0_6px_rgba(74,222,128,0.45)]">
+                ↑ {formatBytes(upSpeed)}/s
+              </span>
+            )}
+            {downSpeed > 0 && (
+              <span className="font-semibold text-[var(--info)] drop-shadow-[0_0_6px_rgba(127,176,255,0.45)]">
+                ↓ {formatBytes(downSpeed)}/s
+              </span>
+            )}
+            <span>
+              已上传 <span className="font-semibold text-[var(--ok)]">{formatBytes(uploaded)}</span>
+            </span>
+            <span>
+              已下载 <span className="font-semibold text-[var(--info)]">{formatBytes(downloaded)}</span>
+            </span>
           </span>
           <span className="ml-auto text-caption text-white/30 group-open:hidden">展开</span>
           <span className="ml-auto hidden text-caption text-white/30 group-open:inline">收起</span>
           <ChevronRightIcon className="size-4 text-white/30 transition-transform group-open:rotate-90" />
         </summary>
         <div className="mt-2 divide-y divide-white/[0.05]">
-          {tasks.map((task) => (
+          {sorted.map((task) => (
             <BoostTaskRow key={task.id} task={task} />
           ))}
         </div>
@@ -937,9 +958,22 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
   );
 }
 
+/**
+ * 刷流单行。数字列走固定宽度而不是跟着内容伸缩——上一版把站点、名称、数字全塞进
+ * 一个 flex 行，每行数字个数不同就把名称挤成不同长度，180 行下来像没对齐的乱码。
+ *
+ * 现在的分工：站点与名称占左半区（名称吃掉全部剩余宽度），上行速度 / 累计上传 /
+ * 体积三列右对齐且逐行等宽；缺值补破折号，保证列不塌陷。窄屏时数字整块换到第二行，
+ * 让名称在小屏也有完整宽度。
+ */
 function BoostTaskRow({ task }: { task: DownloadTask }) {
   const downloading = task.state === "downloading";
   const percent = task.progress == null ? null : Math.floor(task.progress * 100);
+  const upSpeed = task.upspeed_bytes != null && task.upspeed_bytes > 0 ? task.upspeed_bytes : null;
+  const downSpeed =
+    downloading && task.dlspeed_bytes != null && task.dlspeed_bytes > 0
+      ? task.dlspeed_bytes
+      : null;
   const name = (
     <OverflowText className="min-w-0 flex-1 text-ui text-white/80">
       {task.name || task.info_hash}
@@ -947,37 +981,48 @@ function BoostTaskRow({ task }: { task: DownloadTask }) {
   );
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 py-2">
-      {task.site_name && (
-        <span className="shrink-0 rounded-full bg-white/[0.06] px-2 py-0.5 text-caption font-medium text-white/55">
-          {task.site_name}
+      <div className="flex w-[4.5rem] shrink-0">
+        {task.site_name && (
+          <span className="truncate rounded-full bg-white/[0.06] px-2 py-0.5 text-caption font-medium text-white/55">
+            {task.site_name}
+          </span>
+        )}
+      </div>
+      <div className="flex min-w-0 flex-1 items-center gap-x-2">
+        {task.page_url ? (
+          <a
+            href={task.page_url}
+            target="_blank"
+            rel="noreferrer"
+            className="flex min-w-0 flex-1 hover:text-white"
+            title="打开站点种子详情页"
+          >
+            {name}
+          </a>
+        ) : (
+          name
+        )}
+        {/* 下载中的刷流种子是少数，进度与下行速度跟在名称后面，不占用固定数字列 */}
+        {downloading && percent != null && (
+          <span className="tnum shrink-0 text-caption text-white/35">{percent}%</span>
+        )}
+        {downSpeed != null && (
+          <span className="tnum shrink-0 text-caption text-[var(--info)]">
+            ↓ {formatBytes(downSpeed)}/s
+          </span>
+        )}
+      </div>
+      <div className="tnum grid shrink-0 grid-cols-[5.5rem_7rem_5rem] items-center gap-x-3 text-right text-caption text-white/40 max-md:w-full max-md:grid-cols-[5.5rem_7rem_minmax(0,1fr)]">
+        <span className={upSpeed != null ? "font-semibold text-[var(--ok)]" : "text-white/20"}>
+          {upSpeed != null ? `↑ ${formatBytes(upSpeed)}/s` : "—"}
         </span>
-      )}
-      {task.page_url ? (
-        <a
-          href={task.page_url}
-          target="_blank"
-          rel="noreferrer"
-          className="flex min-w-0 flex-1 hover:text-white"
-          title="打开站点种子详情页"
-        >
-          {name}
-        </a>
-      ) : (
-        name
-      )}
-      <span className="tnum flex shrink-0 items-center gap-x-3 text-caption text-white/40">
-        {downloading && percent != null && <span>{percent}%</span>}
-        {downloading && task.dlspeed_bytes != null && task.dlspeed_bytes > 0 && (
-          <span>↓ {formatBytes(task.dlspeed_bytes)}/s</span>
-        )}
-        {task.upspeed_bytes != null && task.upspeed_bytes > 0 && (
-          <span>↑ {formatBytes(task.upspeed_bytes)}/s</span>
-        )}
-        {task.uploaded_bytes != null && task.uploaded_bytes > 0 && (
-          <span>累计 ↑{formatBytes(task.uploaded_bytes)}</span>
-        )}
-        {task.size_bytes != null && <span>{formatBytes(task.size_bytes)}</span>}
-      </span>
+        <span>
+          {task.uploaded_bytes != null && task.uploaded_bytes > 0
+            ? `累计 ↑${formatBytes(task.uploaded_bytes)}`
+            : "—"}
+        </span>
+        <span>{task.size_bytes != null ? formatBytes(task.size_bytes) : "—"}</span>
+      </div>
     </div>
   );
 }
@@ -1018,12 +1063,11 @@ function TaskHistorySection({
             {group.jobs.map((job) => (
               <TaskTimelineItem
                 key={job.id}
-                time={formatClockTime(job.finished_at || job.created_at)}
-                label={`${historicalJobTitle(job)}的完成时间`}
                 tone={job.status === "succeeded" ? "success" : "cancelled"}
               >
                 <HistoricalJobFeedItem
                   job={job}
+                  time={formatClockTime(job.finished_at || job.created_at)}
                   retrying={retryingJobId === job.id}
                   onRetry={() => onRetry(job)}
                 />

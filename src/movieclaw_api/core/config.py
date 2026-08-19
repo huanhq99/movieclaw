@@ -174,6 +174,13 @@ class Settings(BaseSettings):
     # 下，Docker 挂载 data 一个卷即可让更新在容器重建后依然生效。
     # 注意与 docker/entrypoint.sh 的 UPDATES_DIR 是同一个目录（约定一致）。
     updates_dir: str = Field(default="./data/updates", alias="MOVIECLAW_UPDATES_DIR")
+    # 对外端口（前端监听口）的应用内设置文件。事实源是这个文件而不是数据库：
+    # 真正读它的是 docker/entrypoint.sh 与 HEALTHCHECK 两个不读数据库的 shell，
+    # 且端口起不来时 entrypoint 要能就地废弃它回落（见 resolve-web-port.sh）。
+    # 路径同样由 entrypoint 显式导出，避免两边各算各的。
+    web_port_file: str = Field(
+        default="./data/config/web-port", alias="MOVIECLAW_WEB_PORT_FILE"
+    )
     # 更新来源仓库与 API 地址。API 地址可整体换成自建反代。
     update_repo: str = Field(default="yipengfei329/movieclaw", alias="UPDATE_REPO")
     update_api_base_url: str = Field(

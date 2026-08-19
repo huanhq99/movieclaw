@@ -2,6 +2,7 @@
 
 职责：
 - 配置读写：外部访问地址的校验与落库（保存即生效，纯落库数据）；
+- 对外端口：读写 data 卷上的端口设置文件，并以全量重启（43）让它生效；
 - 重启调度：优雅停机后以约定退出码 ``RESTART_EXIT_CODE``（42）退出进程，
   告知守护方「这是重启请求」——Docker 镜像的 entrypoint 内置重启循环，
   见到 42 只重启后端进程，前端保持运行（窗口内 API 反代短暂不可用，发起
@@ -22,12 +23,14 @@ import os
 import signal
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     import uvicorn
 
+from movieclaw_api.core.config import get_settings
 from movieclaw_api.exceptions import BadRequestException
 from movieclaw_api.schemas.app_config import AppConfigPayload, AppConfigView
 from movieclaw_api.settings import AppServerSetting, get_setting_store
@@ -53,9 +56,17 @@ FULL_RESTART_EXIT_CODE = 43
 
 
 async def build_config_view() -> AppConfigView:
-    """装配设置页所需的配置视图。"""
+    """装配设置页所需的配置视图（落库配置 + 对外端口的运行时状态）。"""
     setting = await get_setting_store().get(AppServerSetting)
-    return AppConfigView(external_url=setting.external_url)
+    port, source, rejected = read_web_port_state()
+    return AppConfigView(
+        external_url=setting.external_url,
+        web_port=port,
+        web_port_source=source,
+        web_port_default=DEFAULT_WEB_PORT,
+        web_port_rejected=rejected,
+        web_port_configurable=_web_port_managed(),
+    )
 
 
 def _validate_payload(payload: AppConfigPayload) -> None:
@@ -77,7 +88,114 @@ async def save_config(payload: AppConfigPayload) -> AppConfigView:
         external_url=payload.external_url.strip().rstrip("/"),
     )
     await get_setting_store().set(setting)
-    return AppConfigView(external_url=setting.external_url)
+    return await build_config_view()
+
+
+# ---------------------------------------------------------------------------
+# 对外端口
+# ---------------------------------------------------------------------------
+#
+# 事实源是 data 卷上的一个纯文本文件（默认 data/config/web-port），不是数据库。
+# 理由：真正消费这个值的是 docker/entrypoint.sh 和 Docker HEALTHCHECK 两个
+# **不读数据库**的 shell；而且新端口绑不上时 entrypoint 必须能就地把它废弃并
+# 回落（否则用户改错端口就再也进不来了）——数据库里再存一份必然出现两套真相。
+#
+# 解析口径（文件 > MOVIECLAW_WEB_PORT 环境变量 > 3000）与
+# docker/resolve-web-port.sh 严格一致，改一处必须同步改另一处。
+
+DEFAULT_WEB_PORT = 3000
+# 容器内后端固定监听 8000，且它是 Next 反代的目标（构建时固化）。对外端口撞上
+# 它会让前端起不来、反代链路自指，直接在保存时拦掉。
+_RESERVED_WEB_PORTS = {8000}
+
+
+def _web_port_file() -> Path:
+    return Path(get_settings().web_port_file)
+
+
+def _parse_port(raw: str | None) -> int | None:
+    """把一段文本解析成合法端口；非数字/越界一律 None（按「未配置」处理）。"""
+    text = (raw or "").strip()
+    if not text.isdigit() or len(text) > 5:
+        return None
+    port = int(text)
+    return port if 1 <= port <= 65535 else None
+
+
+def _read_port_file(path: Path) -> int | None:
+    try:
+        return _parse_port(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def _web_port_managed() -> bool:
+    """当前部署形态下改端口是否有意义。
+
+    判据是 entrypoint 导出的 MOVIECLAW_CODE_SOURCE：有它 = 前端进程由容器入口
+    托管，改设置 + 全量重启才能真正换端口。源码部署下前端是开发者自己起的，
+    应用无从干预，设置页据此把入口置灰而不是给一个不生效的开关。
+    """
+    return bool(os.environ.get("MOVIECLAW_CODE_SOURCE"))
+
+
+def read_web_port_state() -> tuple[int, str, int | None]:
+    """返回（当前生效端口, 来源, 上次被自动废弃的端口）。"""
+    path = _web_port_file()
+    port = _read_port_file(path)
+    if port is not None:
+        source = "setting"
+    else:
+        env_port = _parse_port(os.environ.get("MOVIECLAW_WEB_PORT"))
+        port, source = (env_port, "env") if env_port is not None else (DEFAULT_WEB_PORT, "default")
+    return port, source, _read_port_file(path.with_name(path.name + ".rejected"))
+
+
+async def save_web_port(port: int | None) -> AppConfigView:
+    """写入对外端口设置并调度全量重启；port 为 None/0 表示恢复默认。
+
+    重启必须走 43（全量）而不是 42：42 只重启后端、前端进程原地不动，端口是
+    前端监听的，不重启前端就不会变。
+    """
+    if not _web_port_managed():
+        raise BadRequestException(
+            "当前部署形态不支持应用内修改端口：前端进程不由容器入口托管，"
+            "请直接调整启动命令或反向代理"
+        )
+    if port is not None and port != 0:
+        if not 1 <= port <= 65535:
+            raise BadRequestException("端口需在 1~65535 之间")
+        if port in _RESERVED_WEB_PORTS:
+            raise BadRequestException(
+                f"{port} 是容器内后端占用的端口，换一个（前端与后端不能同口）"
+            )
+
+    path = _web_port_file()
+    current, _, _ = read_web_port_state()
+    rejected = path.with_name(path.name + ".rejected")
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if port is None or port == 0:
+            path.unlink(missing_ok=True)
+        else:
+            # 先写临时文件再原子替换：容器恰在此刻被拉走时，entrypoint 下次
+            # 启动读到的要么是旧值要么是新值，不会是半截内容
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(f"{port}\n", encoding="utf-8")
+            tmp.replace(path)
+        # 用户重新设了端口 = 上一次的失败记录已经翻篇，清掉外显
+        rejected.unlink(missing_ok=True)
+    except OSError as exc:
+        raise BadRequestException(f"端口设置写入失败：{exc}") from exc
+
+    view = await build_config_view()
+    # 只有实际生效的端口变了才重启。清除设置后回落到的默认值恰好等于当前端口
+    # 时（很常见），重启是纯粹的打扰。
+    if view.web_port != current:
+        logger.info("对外端口已改为 %d（原 %d），即将全量重启应用使其生效", view.web_port, current)
+        schedule_restart(FULL_RESTART_EXIT_CODE)
+    return view
 
 
 # ---------------------------------------------------------------------------

@@ -18,8 +18,19 @@ export interface AppConfigPayload {
   external_url: string;
 }
 
-/** 读取响应：当前与保存请求体同构。 */
-export type AppConfigView = AppConfigPayload;
+/** 读取响应 = 可保存字段 + 对外端口的只读运行时状态（端口另有专用端点）。 */
+export interface AppConfigView extends AppConfigPayload {
+  /** 当前生效的对外端口（前端监听口） */
+  web_port: number;
+  /** 端口来源：setting（应用内设置）/ env（环境变量）/ default（默认） */
+  web_port_source: "setting" | "env" | "default" | string;
+  /** 内置默认端口 */
+  web_port_default: number;
+  /** 上次启动时因无法绑定而被容器入口自动废弃的端口；null = 无 */
+  web_port_rejected: number | null;
+  /** 当前部署形态是否支持应用内改端口（仅容器入口托管进程的 Docker 部署） */
+  web_port_configurable: boolean;
+}
 
 /** 读取应用设置。 */
 export function getAppConfig(): Promise<AppConfigView> {
@@ -32,6 +43,22 @@ export function saveAppConfig(payload: AppConfigPayload): Promise<AppConfigView>
     request<ApiEnvelope<AppConfigView>>("/app/config", {
       method: "PUT",
       body: JSON.stringify(payload),
+    }),
+  );
+}
+
+/**
+ * 修改对外端口：写 data 卷上的端口设置文件，并触发**全量重启**使其生效
+ * （只重后端的 42 换不了端口）。传 null 清除设置、恢复默认。
+ *
+ * 注意重启后应用监听的是新端口，当前页面的地址多半已经打不开——调用方要引导
+ * 用户去新地址，而不是原地轮询等恢复。
+ */
+export function saveWebPort(port: number | null): Promise<AppConfigView> {
+  return unwrap(
+    request<ApiEnvelope<AppConfigView>>("/app/port", {
+      method: "PUT",
+      body: JSON.stringify({ port }),
     }),
   );
 }

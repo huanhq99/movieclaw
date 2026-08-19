@@ -5,11 +5,12 @@
 ``https://movie.example.com``），供生成通知链接、回调地址等绝对 URL 的场景
 使用（Agent 系统提示词的环境段也注入它来拼页面链接）。
 
-为什么没有「端口」设置：用户视角的访问入口是前端（Docker 默认 3000，对外
-端口由 compose 的 ports 映射决定），后端 8000 只在容器内被 Next 反代，
-两者都不是后端进程能有意义地配置的——前端端口它控制不了，改自己的监听
-端口对外部访问没有意义。后端监听端口如需调整（源码部署），用 ``APP_PORT``
-环境变量。
+为什么端口不在这个配置域里：对外端口（前端监听口）确实可以在应用内改，但它
+的事实源是 data 卷上的端口文件而不是数据库——真正读它的是 entrypoint 与
+Docker HEALTHCHECK 两个不读数据库的 shell，且端口绑不上时 entrypoint 要能就地
+废弃它回落。读写逻辑见 ``services/app_config.py`` 的「对外端口」一节，解析口径
+见 ``docker/resolve-web-port.sh``。后端监听端口（容器内 8000）仍不可应用内配置：
+它是 Next 反代目标、构建时固化，源码部署下用 ``APP_PORT`` 环境变量调整。
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ class AppServerSetting(SettingSchema):
 
     历史字段说明：早期版本曾有 ``port``（后端监听端口）字段，后因「改后端
     端口对外部访问没有意义」而移除；基类 ``extra="ignore"`` 保证带旧字段的
-    存量记录读取不报错。
+    存量记录读取不报错。现在可配的是**对外端口**，且不落库（见模块文档）。
     """
 
     external_url: str = Field(

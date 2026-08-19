@@ -19,7 +19,7 @@ import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
 
 from movieclaw_api.services.library.access import member_visible_ids
@@ -133,14 +133,10 @@ async def playback_info(
     files = await _files_for_ref(ref, identity.device.member_id)
     selected = _select_source(files, media_source_id, item_id)
     if not selected:
-        return JSONResponse(
-            {"MediaSources": [], "ErrorCode": "NoCompatibleStream"}
-        )
+        return JSONResponse({"MediaSources": [], "ErrorCode": "NoCompatibleStream"})
     # 播放协商是唯一现读 strm 的场景：直链多带时效签名，须现读现用；
     # 解析失败的版本剔除，全部失败按"无可播源"应答
-    pairs = [
-        (f, s) for f in selected if (s := media_source_dto(f, resolve_strm=True))
-    ]
+    pairs = [(f, s) for f in selected if (s := media_source_dto(f, resolve_strm=True))]
     if not pairs:
         return JSONResponse({"MediaSources": [], "ErrorCode": "NoCompatibleStream"})
 
@@ -172,9 +168,7 @@ def _unit_item_guid(ref: EntityRef) -> str:
     return item_guid(ref.entity_id)
 
 
-def _apply_subtitle_delivery(
-    source: dict, f: LibraryFile, ref: EntityRef, token: str
-) -> None:
+def _apply_subtitle_delivery(source: dict, f: LibraryFile, ref: EntityRef, token: str) -> None:
     """给外挂字幕流补投递字段（仅 PlaybackInfo 场景，jellyfin-subtitle.md §4.3）。
 
     无条件输出是既定偏离：真 Jellyfin 无 DeviceProfile 时不输出，我们不
@@ -193,8 +187,7 @@ def _apply_subtitle_delivery(
         stream["DeliveryMethod"] = "External"
         stream["IsExternalUrl"] = False
         stream["DeliveryUrl"] = (
-            f"/Videos/{item_g}/{ms_g}/Subtitles/{stream['Index']}/0/Stream.{fmt}"
-            f"?ApiKey={token}"
+            f"/Videos/{item_g}/{ms_g}/Subtitles/{stream['Index']}/0/Stream.{fmt}?ApiKey={token}"
         )
 
 
@@ -267,7 +260,6 @@ async def video_stream(
     return DisconnectAwareFileResponse(
         path,
         media_type=media_type,
-        is_disconnected=request.is_disconnected,
         session_stopped=session_stopped,
         on_close=lambda: unregister_device_stream(device_id, session_stopped),
     )
@@ -314,13 +306,15 @@ async def download_item(
     path = Path(f.file_path)
     if not path.is_file():
         raise not_found()
-    # 下载不是播放会话：用普通 FileResponse，不登记设备流，避免用户边下边看
-    # 时点"停止播放"误杀下载读盘（TCP 断连兜底对下载器依然生效）
+    # 下载不是播放会话：不登记设备流，避免用户边下边看时点"停止播放"误杀
+    # 下载读盘；但下载器取消/断网后必须停止读盘（裸 FileResponse 会把几十 GB
+    # 读到底），且保留 Content-Length 供下载器显示进度与续传
     is_download = request.url.path.lower().endswith("/download")
-    return FileResponse(
+    return DisconnectAwareFileResponse(
         path,
         media_type=container_mime_type(f.container or path.suffix),
         filename=path.name if is_download else None,
+        keep_content_length=True,
     )
 
 

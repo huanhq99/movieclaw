@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from movieclaw_jellyfin.errors import JellyfinError, render_error
 from movieclaw_jellyfin.routes.common import require_enabled
@@ -171,25 +172,52 @@ def register(app: FastAPI) -> None:
         rewritten = [(query_key_map.get(k.lower(), k), v) for k, v in pairs]
         return urlencode(rewritten).encode("latin-1")
 
-    @app.middleware("http")
-    async def jellyfin_case_normalizer(request: Request, call_next):  # type: ignore[no-untyped-def]
-        path = request.scope.get("path", "")
-        parts = path.split("/")
-        in_namespace = len(parts) > 1 and parts[1].lower() in NAMESPACE_PREFIXES
-        if in_namespace:
-            request.scope["path"] = "/".join(_normalize_segment(p) for p in parts)
-            raw_query = request.scope.get("query_string", b"")
+    class JellyfinCaseNormalizer:
+        """纯 ASGI 中间件（不要改回 BaseHTTPMiddleware：它会让取流的断连检测
+        失效并给每个 body 块加一跳转发，见 movieclaw_api/middleware.py）。"""
+
+        def __init__(self, inner: ASGIApp) -> None:
+            self.inner = inner
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] != "http":
+                await self.inner(scope, receive, send)
+                return
+            path = scope.get("path", "")
+            parts = path.split("/")
+            in_namespace = len(parts) > 1 and parts[1].lower() in NAMESPACE_PREFIXES
+            if not in_namespace:
+                await self.inner(scope, receive, send)
+                return
+            scope["path"] = "/".join(_normalize_segment(p) for p in parts)
+            raw_query = scope.get("query_string", b"")
             if raw_query:
-                request.scope["query_string"] = _normalize_query(raw_query)
-        response = await call_next(request)
-        # 命名空间内未实现的路径/方法（/LiveStreams/Open、master.m3u8 等）会
-        # 落到业务统一处理器，返回 RESOURCE_NOT_FOUND 业务信封——这是最容易
-        # 暴露"不是真 Jellyfin"的地方。路由未匹配（scope 无 route）时改按
-        # 协议形态应答：404/405 空 body，对齐 ASP.NET 终结点兜底
-        if (
-            in_namespace
-            and response.status_code in (404, 405)
-            and "route" not in request.scope
-        ):
-            return Response(status_code=response.status_code)
-        return response
+                scope["query_string"] = _normalize_query(raw_query)
+
+            # 命名空间内未实现的路径/方法（/LiveStreams/Open、master.m3u8 等）会
+            # 落到业务统一处理器，返回 RESOURCE_NOT_FOUND 业务信封——这是最容易
+            # 暴露"不是真 Jellyfin"的地方。路由未匹配（scope 无 route）时改按
+            # 协议形态应答：404/405 空 body，对齐 ASP.NET 终结点兜底
+            swallow_body = False
+
+            async def send_normalized(message: Message) -> None:
+                nonlocal swallow_body
+                if message["type"] == "http.response.start":
+                    if message["status"] in (404, 405) and "route" not in scope:
+                        swallow_body = True
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": message["status"],
+                                "headers": [],
+                            }
+                        )
+                        await send({"type": "http.response.body", "body": b"", "more_body": False})
+                        return
+                elif swallow_body and message["type"] == "http.response.body":
+                    return
+                await send(message)
+
+            await self.inner(scope, receive, send_normalized)
+
+    app.add_middleware(JellyfinCaseNormalizer)

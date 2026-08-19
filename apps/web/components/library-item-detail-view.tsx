@@ -55,6 +55,7 @@ import { getDiscoveryReturnPath } from "@/lib/discovery-return-path";
 import { formatBytes, formatRuntimeMinutes, formatVideoResolution } from "@/lib/format";
 import { USER_LOWEST_SOURCE, mediaSourceDisplayLabel } from "@/lib/media-source-annotation";
 import { useDoubanAppHref } from "@/lib/douban-app-link";
+import { useBackdrop } from "@/lib/backdrop";
 import { resolveRequestUrl } from "@/lib/http";
 import { cachedImageUrl } from "@/lib/image-proxy";
 import { invalidateLibraryDetailSnapshot } from "@/lib/library-detail-snapshot";
@@ -76,7 +77,7 @@ interface SelectedEpisodeContext {
  * （MediaDetailView，纯 TMDB 实时数据）职责不同：这里回答的是
  * 「**我拥有的这份拷贝**是什么」，全部信息来自本地刮削成果与文件本体：
  *
- *   1. Hero 背景优先条目目录里的 fanart（本地美术图接口），其次 TMDB 剧照；
+ *   1. 沉浸背景（全站背景临时换成本片剧照）优先条目目录里的 fanart（本地美术图接口），其次 TMDB 剧照；
  *   2. 简介 / 风格 / 片长 / 演职员来自条目目录的 NFO（TMM/Emby 刮削产物）；
  *   3. 片源规格来自 ffprobe 对文件本体的探测；基础信息展示当前文件的音轨 / 字幕，
  *      底部文件区按物理文件折叠尺寸 / 视频 / 码率，剧集只展示当前选中集；
@@ -168,6 +169,17 @@ export function LibraryItemDetailView({
     setSelectedTrackFileId(null);
     reload();
   }, [reload]);
+
+  // 沉浸背景：进入本页把全站背景临时换成该片剧照（侧栏、外壳留白一起透出，
+  // 不再只铺详情卡片的局部），离开即恢复用户配置的背景——见 lib/backdrop.tsx
+  // 的 setOverrideBackdrop。没有横幅剧照时退回海报，覆盖层自己会铺满作氛围色。
+  const { setOverrideBackdrop } = useBackdrop();
+  const immersiveUrl = detail ? imageUrl(detail.backdrop_url ?? detail.poster_url) : "";
+  useEffect(() => {
+    if (!immersiveUrl) return;
+    setOverrideBackdrop(immersiveUrl);
+    return () => setOverrideBackdrop(null);
+  }, [immersiveUrl, setOverrideBackdrop]);
 
   // 待回收行的恢复 / 立即清理（library-file-recycle.md §7）。
   // 恢复是可逆动作直接执行；清理真删磁盘，做种保护形态额外讲清断种风险
@@ -271,7 +283,6 @@ export function LibraryItemDetailView({
 
   const isMovie = detail.kind === "movie";
   const meta = detail.local_meta;
-  const itemBackdropUrl = imageUrl(detail.backdrop_url ?? detail.poster_url);
   // 片长：NFO 的 runtime 优先，其次任意文件的实测时长
   const runtimeMinutes =
     meta?.runtime_minutes ??
@@ -363,25 +374,11 @@ export function LibraryItemDetailView({
     // 满屏布局，没有留白，圆角直接压在屏幕边上：顶栏的吸顶雾层被这层
     // overflow 一裁，就成了贴在屏幕顶上的一块圆角色块（手机上肉眼可见的
     // 两个缺角），底边同理被 Home 指示条切掉。手机上一律方角、真通栏。
-    <div className="scroll-thin scroll-safe relative isolate h-full overflow-y-auto rounded-2xl bg-black max-md:rounded-none">
-      {/* 背景只属于顶部 Hero：有限高度、随页面滚走；cover 始终等比例缩放，
-          只裁切超出的边缘，不改变图片宽高比。图片自身先在较长区间内淡出到
-          完全透明，真正的容器底边因此只剩下同色黑底，不会形成一条切边。 */}
-      {itemBackdropUrl && (
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[calc(30vh+360px)] min-h-[540px] bg-cover bg-center bg-no-repeat max-md:h-[calc(22vh+340px)] max-md:min-h-[460px]"
-          style={{
-            backgroundImage: `url(${JSON.stringify(itemBackdropUrl)})`,
-            WebkitMaskImage:
-              "linear-gradient(to bottom,#000 0%,#000 50%,rgba(0,0,0,.92) 60%,rgba(0,0,0,.65) 72%,rgba(0,0,0,.3) 84%,rgba(0,0,0,.08) 93%,transparent 98%,transparent 100%)",
-            maskImage:
-              "linear-gradient(to bottom,#000 0%,#000 50%,rgba(0,0,0,.92) 60%,rgba(0,0,0,.65) 72%,rgba(0,0,0,.3) 84%,rgba(0,0,0,.08) 93%,transparent 98%,transparent 100%)",
-          }}
-        />
-      )}
-
-      {/* 顶栏首屏只有返回键与操作入口浮在局部剧照上。 */}
+    <div className="detail-ambient scroll-thin scroll-safe relative isolate h-full overflow-y-auto rounded-2xl max-md:rounded-none">
+      {/* 没有任何 Hero 图层：全站背景此刻就是本片剧照（沉浸覆盖 + 本页豁免
+          全局蒙版，见 app-shell 的 isHome），大图直出、零边界；.detail-ambient
+          在滚动容器上铺「透明 → 纯黑」的渐变板托住下方内容（见 globals.css）。
+          顶栏首屏只有返回键与操作入口浮在剧照上。 */}
       <PageNav
         title={detail.title}
         fallback={navFallback}
@@ -433,9 +430,9 @@ export function LibraryItemDetailView({
       {/* 氛围留白：这一段什么都不放，让剧照完整呼吸 */}
       <div className="h-[30vh] min-h-[180px] max-md:h-[22vh] max-md:min-h-[120px]" />
 
-      {/* 内容遮罩与图片透明衰减交叠：用更多低跨度色阶缓慢落黑，避免在某个
-          固定高度突然结束渐变；音轨附近已经接近纯黑，下面则保持全黑。 */}
-      <div className="relative z-10 -mt-28 bg-[linear-gradient(180deg,rgba(0,0,0,0)_0,rgba(0,0,0,0.16)_42px,rgba(0,0,0,0.34)_78px,rgba(0,0,0,0.55)_120px,rgba(0,0,0,0.73)_165px,rgba(0,0,0,0.87)_210px,rgba(0,0,0,0.96)_255px,#000_315px,#000_100%)] pb-12 pt-28">
+      {/* 内容层：-mt-28/pt-28 与 .detail-ambient 的渐变起点对齐——渐变从标题
+          上方开始压暗，音轨附近已接近纯黑，下面保持全黑。 */}
+      <div className="relative z-10 -mt-28 pb-12 pt-28">
       {/* —— 头部信息区 —— */}
       <div className="relative z-10 px-12 pt-6 max-md:px-4 max-md:pt-3">
         <div className="min-w-0 max-w-5xl pb-1">

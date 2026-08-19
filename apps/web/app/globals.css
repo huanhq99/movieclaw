@@ -419,6 +419,47 @@ body::before {
 }
 
 /*
+ * 影片详情页（媒体库条目 / 发现页条目）的「剧照 → 纯黑」渐变板。
+ *
+ * 剧照本身是全站背景（BackdropProvider 的沉浸覆盖层，随页面进入淡入、
+ * 离开淡出），详情页自己不再画任何 Hero 图层；这层渐变挂在页面的滚动容器上，
+ * 顶部一段完全透明让剧照直出，从标题上方开始逐级压暗，到基础信息之后落成
+ * 纯黑并一直铺到内容底部。
+ *
+ * 为什么挂在滚动容器的 background 上、而不是内容层的 div：
+ *   - .scroll-thin 在 WebKit 下是占位的经典滚动条（9px），绝对定位 / 普通流
+ *     的子元素都盖不到滚动条轨道那一条，轨道透明就会漏出一条原图；元素自身
+ *     的 background 覆盖的是 border-box，连轨道一起盖住；
+ *   - background-attachment: local 让渐变随内容一起滚动、并以整个可滚动
+ *     高度为 100%，短内容时也至少铺满容器，底部不会露出剧照。
+ * 渐变起点 --detail-ambient-top = 氛围留白高度 − 内容层上提量（-mt-28 = 112px），
+ * 色阶与原先内容层上的渐变完全一致。
+ */
+.detail-ambient {
+  --detail-ambient-top: calc(max(30vh, 180px) - 112px);
+  background-image: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0,
+    rgba(0, 0, 0, 0) var(--detail-ambient-top),
+    rgba(0, 0, 0, 0.16) calc(var(--detail-ambient-top) + 42px),
+    rgba(0, 0, 0, 0.34) calc(var(--detail-ambient-top) + 78px),
+    rgba(0, 0, 0, 0.55) calc(var(--detail-ambient-top) + 120px),
+    rgba(0, 0, 0, 0.73) calc(var(--detail-ambient-top) + 165px),
+    rgba(0, 0, 0, 0.87) calc(var(--detail-ambient-top) + 210px),
+    rgba(0, 0, 0, 0.96) calc(var(--detail-ambient-top) + 255px),
+    #000 calc(var(--detail-ambient-top) + 315px),
+    #000 100%
+  );
+  background-attachment: local;
+  background-repeat: no-repeat;
+}
+@media (max-width: 767px) {
+  .detail-ambient {
+    --detail-ambient-top: calc(max(22vh, 120px) - 112px);
+  }
+}
+
+/*
  * 氛围页的加载/错误兜底底板。
  *
  * 「氛围页」（首页与两个影片详情页，见 app-shell 的 isHome）刻意不铺全局蒙版，

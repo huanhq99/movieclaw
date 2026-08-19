@@ -1003,6 +1003,10 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
  * 现在的分工：站点与名称占左半区（名称吃掉全部剩余宽度），上行速度 / 累计上传 /
  * 体积三列右对齐且逐行等宽；缺值补破折号，保证列不塌陷。窄屏时数字整块换到第二行，
  * 让名称在小屏也有完整宽度。
+ *
+ * 下行速度刻意不占固定列：刷流种子绝大多数只做种不下载，给它留一列的结果是整张列表
+ * 挂着一排毫无信息量的破折号，还把上行速度挤到要换行。它改成和进度百分比一起跟在
+ * 名称后面，只在真的在下载时出现。
  */
 function BoostTaskRow({ task }: { task: DownloadTask }) {
   const downloading = task.state === "downloading";
@@ -1035,13 +1039,21 @@ function BoostTaskRow({ task }: { task: DownloadTask }) {
         ) : (
           name
         )}
-        {/* 下载中的刷流种子是少数，进度跟在名称后面；下行速度与上行并列进固定数字列 */}
+        {/* 下载中的刷流种子是少数：进度与下行速度都跟在名称后面按需出现，不占固定列 */}
         {downloading && percent != null && (
           <span className="tnum shrink-0 text-caption text-white/35">{percent}%</span>
         )}
+        <SpeedStat
+          direction="down"
+          bytesPerSecond={task.dlspeed_bytes}
+          className="shrink-0 text-caption"
+        />
       </div>
-      <div className="tnum grid shrink-0 grid-cols-[5.5rem_5.5rem_7rem_5rem] items-center gap-x-3 text-right text-caption text-white/40 max-md:w-full max-md:grid-cols-[5.5rem_5.5rem_7rem_minmax(0,1fr)]">
-        <SpeedStat direction="down" bytesPerSecond={task.dlspeed_bytes} placeholder="—" />
+      {/* 窄屏字号比桌面大一档（--text-caption 11px → 13px），5.5rem 装不下
+          "↑ 63.95 KB/s"，速度会被折成两行。窄屏改用按内容需求配比的弹性列
+          （速度 : 累计 : 体积 ≈ 9 : 10 : 7），列宽随屏宽缩放而比例不变——既保住逐行
+          对齐，也让 360px 的小屏和 430px 的大屏都留有余量；nowrap 再兜一道底 */}
+      <div className="tnum grid shrink-0 grid-cols-[5.5rem_7rem_5rem] items-center gap-x-3 whitespace-nowrap text-right text-caption text-white/40 max-md:w-full max-md:grid-cols-[9fr_10fr_7fr] max-md:gap-x-2">
         <SpeedStat direction="up" bytesPerSecond={task.upspeed_bytes} placeholder="—" />
         <span>
           {task.uploaded_bytes != null && task.uploaded_bytes > 0

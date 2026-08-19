@@ -280,6 +280,8 @@ ensure_nginx_port() {
     if "$NGINX_BIN" -c "$NGINX_RUN_DIR/nginx.conf" -s reload; then
         echo "[entrypoint] 前门已切换到新的对外端口 $WEB_PORT（原 $NGINX_ACTIVE_PORT）。"
         NGINX_ACTIVE_PORT="$WEB_PORT"
+        # 看门狗探的是对外链路，必须跟着换口（看门狗随每次 start_all 重建，会读到新值）
+        FRONT_HEALTH_URL="http://127.0.0.1:$WEB_PORT/api/v1/health"
     else
         echo "[entrypoint] 前门切换到端口 $WEB_PORT 失败，仍在 $NGINX_ACTIVE_PORT 上服务。" >&2
     fi

@@ -402,6 +402,7 @@ export function MediaDetailView({
               title: collection.name,
               items: collection.items,
             }}
+            insetClassName="px-12 max-md:px-4"
           />
         </div>
       )}
@@ -409,7 +410,10 @@ export function MediaDetailView({
       {/* —— 9. 相似推荐 —— */}
       {related.length > 0 && (
         <div className="mt-9">
-          <MediaRow row={{ id: `related-${item.id}`, title: "相似推荐", items: related }} />
+          <MediaRow
+            row={{ id: `related-${item.id}`, title: "相似推荐", items: related }}
+            insetClassName="px-12 max-md:px-4"
+          />
         </div>
       )}
 

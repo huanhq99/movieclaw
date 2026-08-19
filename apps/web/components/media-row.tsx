@@ -18,6 +18,7 @@ export function MediaRow({
   cardAction,
   cardHref,
   cardRevealInfoOnTouch = false,
+  insetClassName = "px-6 max-md:px-4",
 }: {
   row: MediaRowData;
   moreHref?: Route;
@@ -38,13 +39,20 @@ export function MediaRow({
    * 这类纯信息层的行需要显式打开。
    */
   cardRevealInfoOnTouch?: boolean;
+  /**
+   * 行的左右留白，缺省对齐发现页 / 媒体库首页的 px-6 栅格。影片详情页正文用
+   * px-12，行不跟着改的话标题与海报会比上方的简介、剧照墙往左戳出一截。
+   */
+  insetClassName?: string;
 }) {
   return (
     // content-visibility：视口外的整行（标题 + 几十张海报卡）跳过布局与绘制，
     // 发现页 16 行 / 库首页多行「最近添加」的首帧与滚动成本只与可见行相关；
     // intrinsic-size 先占住一行的近似高度（auto 记住实测值），滚动条不跳
     <section className="relative [contain-intrinsic-size:auto_330px] [content-visibility:auto]">
-      <div className="mb-3 flex items-center justify-between gap-4 px-6 max-md:mb-2 max-md:px-4">
+      <div
+        className={`mb-3 flex items-center justify-between gap-4 max-md:mb-2 ${insetClassName}`}
+      >
         <h3 className="text-on-image text-body-lg font-semibold tracking-[-0.01em] text-[var(--text)]">
           {row.title}
         </h3>
@@ -58,7 +66,7 @@ export function MediaRow({
         )}
       </div>
 
-      <HScroller className="gap-4 px-6 pb-1 pt-1 max-md:gap-3 max-md:px-4">
+      <HScroller className={`gap-4 pb-1 pt-1 max-md:gap-3 ${insetClassName}`}>
         {row.items.map((item) => (
           <div
             key={`${row.id}-${item.id}`}

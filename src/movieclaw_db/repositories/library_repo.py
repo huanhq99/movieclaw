@@ -196,6 +196,7 @@ class LibraryRepository:
         root_paths: list[str],
         match_rules: list | None = None,
         auto_clear_missing: bool = False,
+        realtime_watch: bool = True,
     ) -> Library:
         """新增一个库。该 kind 尚无默认库时，新库自动成为默认。新库置于
         展示顺序末尾（现有最大 sort_order + 1，不打乱用户排好的顺序）。"""
@@ -206,6 +207,7 @@ class LibraryRepository:
             root_paths=list(root_paths),
             match_rules=list(match_rules or []),
             auto_clear_missing=auto_clear_missing,
+            realtime_watch=realtime_watch,
             is_default=await self.get_default(kind) is None,
             sort_order=max((lib.sort_order for lib in existing), default=0) + 1,
         )
@@ -234,11 +236,14 @@ class LibraryRepository:
         root_paths: list[str],
         match_rules: list | None = None,
         auto_clear_missing: bool | None = None,
+        realtime_watch: bool | None = None,
     ) -> Library | None:
         """更新名称/根路径/收藏范围（kind 创建后不可改）；不存在返回 None。
 
         ``auto_clear_missing`` 传 None 表示不改动——它是个危险开关（清理
         不可恢复），不能因为某个客户端的请求体里没带这个字段就被静默关掉。
+        ``realtime_watch`` 同理：None = 保持原值，避免老客户端不带字段
+        就把用户关掉的监控又悄悄打开。
         """
         row = await self.get(library_id)
         if row is None:
@@ -248,6 +253,8 @@ class LibraryRepository:
         row.match_rules = list(match_rules or [])
         if auto_clear_missing is not None:
             row.auto_clear_missing = auto_clear_missing
+        if realtime_watch is not None:
+            row.realtime_watch = realtime_watch
         row.updated_at = utcnow()
         await self._session.commit()
         await self._session.refresh(row)

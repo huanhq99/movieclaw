@@ -73,6 +73,15 @@ class Library(TimestampMixin, table=True):
     auto_clear_missing: bool = Field(
         default=False, description="扫描后自动清理已确认丢失的库存记录（不可恢复）"
     )
+    # 实时监控（watchdog 文件事件 → 增量扫描）的库级开关，默认**开**。
+    # 关闭动机是网络挂载（SMB/CIFS/NFS）：inotify 收不到远端变更、递归建
+    # watch 还要对整棵目录树逐目录往返（issue #162 的启动拖死即由此而来），
+    # 纯付成本无收益。关闭后该库不建监听、没有事件驱动的扫描；定期对账与
+    # 手动扫描照常，新文件仍会被发现，只是不实时——与 Emby/Plex 的
+    # real-time monitoring 开关同一语义
+    realtime_watch: bool = Field(
+        default=True, description="是否启用实时文件监控（关闭后靠定期对账与手动扫描）"
+    )
 
     # —— 库存统计快照 ----------------------------------------------------
     # 媒体库首页是高频读路径，不能每次打开都扫描 library_file 全表再聚合。

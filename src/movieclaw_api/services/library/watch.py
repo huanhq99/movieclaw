@@ -244,10 +244,13 @@ class LibraryWatcher:
         db = get_database()
         async with db.session() as session:
             libraries = list((await session.execute(select(Library))).scalars().all())
+        # 关闭了实时监控的库（realtime_watch=false，SMB/NFS 网络挂载的典型
+        # 选择）不进清单：差量重建会自动拆掉它已有的监听，其新文件由定期
+        # 对账与手动扫描发现
         roots = [
             (library.id, str(Path(root)))
             for library in libraries
-            if library.id is not None
+            if library.id is not None and library.realtime_watch
             for root in library.root_paths
         ]
         async with self._refresh_lock:

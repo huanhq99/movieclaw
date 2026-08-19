@@ -216,6 +216,7 @@ class LibraryConfigService:
         root_paths: list[str],
         match_rules: list | None = None,
         auto_clear_missing: bool | None = None,
+        realtime_watch: bool | None = None,
     ) -> Library:
         """新增一个库。该类型尚无默认库时自动成为默认。"""
         from movieclaw_api.services.library.routing import validate_match_rules
@@ -231,6 +232,8 @@ class LibraryConfigService:
             root_paths=roots,
             match_rules=rules,
             auto_clear_missing=bool(auto_clear_missing),
+            # 实时监控默认开（与 Emby/Plex 一致）；不传按默认
+            realtime_watch=True if realtime_watch is None else bool(realtime_watch),
         )
         self._refresh_watcher()
         return row
@@ -243,10 +246,12 @@ class LibraryConfigService:
         root_paths: list[str],
         match_rules: list | None = None,
         auto_clear_missing: bool | None = None,
+        realtime_watch: bool | None = None,
     ) -> Library:
         """更新名称/根路径/收藏范围。kind 创建后不可改（订阅按类型挂库）。
 
-        ``auto_clear_missing`` 为 None 时保持原值（见 LibraryRepository.update）。
+        ``auto_clear_missing`` / ``realtime_watch`` 为 None 时保持原值
+        （见 LibraryRepository.update）。
         """
         await self.get(library_id)
         from movieclaw_api.services.library.routing import validate_match_rules
@@ -262,8 +267,10 @@ class LibraryConfigService:
             root_paths=roots,
             match_rules=rules,
             auto_clear_missing=auto_clear_missing,
+            realtime_watch=realtime_watch,
         )
         assert updated is not None  # get() 已确认存在
+        # 开关切换也走同一次后台差量重建：关掉的库拆监听、打开的库建监听
         self._refresh_watcher()
         return updated
 

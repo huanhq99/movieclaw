@@ -57,6 +57,8 @@ export interface MediaLibrary {
   match_rules: MatchRule[];
   /** 扫描后自动清理已确认丢失的库存记录（只删台账不动磁盘，不可恢复） */
   auto_clear_missing: boolean;
+  /** 是否启用实时文件监控（关闭后靠定期对账与手动扫描，SMB/NFS 建议关） */
+  realtime_watch: boolean;
   /** 库存统计快照（台账变化时重算，列表查询不扫描文件台账） */
   stats: LibraryStats;
   /** 是否正在扫描 */
@@ -309,6 +311,8 @@ export interface LibraryPayload {
   match_rules?: MatchRule[];
   /** 扫描后自动清理已确认丢失的库存记录；不传=不改动（新建时默认关） */
   auto_clear_missing?: boolean;
+  /** 是否启用实时文件监控；不传=不改动（新建时默认开） */
+  realtime_watch?: boolean;
 }
 
 /** 收藏范围的可选项（后端唯一真相源：类型 chips 与区域预设）。 */

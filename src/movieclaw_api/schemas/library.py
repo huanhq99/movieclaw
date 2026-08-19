@@ -37,6 +37,16 @@ class LibraryPayload(BaseModel):
             "不传表示不改动，新建时默认关闭"
         ),
     )
+    # 同为"不传 = 不改动"：老客户端的请求体没带该字段，不能把用户关掉的
+    # 监控悄悄打开（或反过来）
+    realtime_watch: bool | None = Field(
+        default=None,
+        description=(
+            "是否启用实时文件监控（关闭后该库不建 watchdog 监听，"
+            "靠定期对账与手动扫描发现新文件——SMB/NFS 网络挂载建议关闭）；"
+            "不传表示不改动，新建时默认开启"
+        ),
+    )
 
 
 class LibraryReorderPayload(BaseModel):
@@ -164,6 +174,7 @@ class LibraryView(BaseModel):
     auto_clear_missing: bool = Field(
         default=False, description="扫描后自动清理已确认丢失的库存记录"
     )
+    realtime_watch: bool = Field(default=True, description="是否启用实时文件监控")
     stats: LibraryStats = Field(default_factory=LibraryStats)
     scanning: bool = Field(default=False, description="是否正在扫描")
     scan_progress: ScanProgressView | None = Field(default=None, description="扫描实时进度")
@@ -209,6 +220,7 @@ class LibraryView(BaseModel):
             is_default=row.is_default,
             match_rules=list(row.match_rules),
             auto_clear_missing=row.auto_clear_missing,
+            realtime_watch=row.realtime_watch,
             stats=LibraryStats(
                 item_count=row.stats_item_count,
                 file_count=row.stats_file_count,

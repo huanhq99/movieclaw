@@ -643,6 +643,53 @@ async def test_ingest_apply_watches_incremental_and_first_time_catchup(tmp_path)
         await asyncio.to_thread(watcher._stop_observer)
 
 
+async def test_realtime_watch_toggle_controls_watching(db, tmp_path) -> None:
+    """按库关闭实时监控（issue #162）：关掉的库不建监听；开关切换走差量
+    重建——关闭即拆监听、重新打开即恢复，其余库的 watch 原样不动。"""
+    pytest.importorskip("watchdog")
+    root_on = tmp_path / "local"
+    root_off = tmp_path / "smb"
+    root_on.mkdir()
+    root_off.mkdir()
+    async with db.session() as session:
+        repo = LibraryRepository(session)
+        lib_on = await repo.create(name="本地库", kind="movie", root_paths=[str(root_on)])
+        lib_off = await repo.create(
+            name="网络库", kind="movie", root_paths=[str(root_off)], realtime_watch=False
+        )
+    assert lib_on.realtime_watch is True  # 默认开
+
+    watcher = watch_mod.LibraryWatcher()
+    watcher._loop = asyncio.get_running_loop()
+    try:
+        await watcher.refresh_watches()
+        assert set(watcher._entries) == {(lib_on.id, str(root_on))}, "关闭监控的库不得建监听"
+        kept = watcher._entries[(lib_on.id, str(root_on))][1]
+
+        # 重新打开 → 差量补建；本地库的 watch 对象原样保留
+        async with db.session() as session:
+            row = await session.get(Library, lib_off.id)
+            row.realtime_watch = True
+            await session.commit()
+        await watcher.refresh_watches()
+        assert set(watcher._entries) == {
+            (lib_on.id, str(root_on)),
+            (lib_off.id, str(root_off)),
+        }
+        assert watcher._entries[(lib_on.id, str(root_on))][1] is kept
+
+        # 再关掉 → 差量拆除
+        async with db.session() as session:
+            row = await session.get(Library, lib_off.id)
+            row.realtime_watch = False
+            await session.commit()
+        await watcher.refresh_watches()
+        assert set(watcher._entries) == {(lib_on.id, str(root_on))}
+        assert watcher._entries[(lib_on.id, str(root_on))][1] is kept
+    finally:
+        await asyncio.to_thread(watcher._stop_observer)
+
+
 # ---------------------------------------------------------------------------
 # 5. 观察者线程侧合并 + 启动不阻塞
 # ---------------------------------------------------------------------------

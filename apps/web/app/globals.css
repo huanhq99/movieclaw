@@ -231,6 +231,52 @@ textarea,
   touch-action: manipulation;
 }
 
+/* —— 装成 App 之后的「不可选中」触感 ——
+   浏览器标签页里长按能选中文字、弹出「拷贝 / 查询」系统菜单，这是网页的
+   正常预期；但加到主屏独立打开后，用户会按原生 App 的直觉去操作——长按
+   导航项、按钮、列表行，只会拖出一片蓝色选区和系统菜单，手感立刻「掉回
+   网页」。原生 App 里这些控件文案本来就是选不中的。
+
+   做法是把外壳整体设为不可选，再把**真正值得复制的内容**逐类放开：输入
+   控件、Markdown 正文、代码块，以及显式挂了 .selectable 的文本（对话气泡、
+   系统日志、错误详情、剧情简介、字幕预览等）。
+
+   两个限定条件缺一不可：
+   - display-mode: standalone —— 只管「已安装成 App」的形态，浏览器里访问
+     照旧是网页行为，不剥夺用户随手复制的能力；
+   - pointer: coarse —— 只管手指操作的设备，桌面端安装的 PWA 是鼠标 + 键盘，
+     禁选会直接毁掉拖选复制。
+   两者相与即「手机 / 平板上的 PWA」，iOS 与 Android 一并覆盖。
+
+   放开时 user-select 与 -webkit-touch-callout 必须同时重申：前者是继承属性，
+   后者在 iOS 上同样逐级继承，只改一个会剩下另一个继续拦着（典型症状是
+   文字能选中了、长按却还是不弹拷贝菜单）。 */
+@media (display-mode: standalone) and (pointer: coarse) {
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  /* :where() 把优先级压到 0，不去和组件自己的选择器抢。注意本段是无层 CSS，
+     整体优先于 Tailwind 的 @layer utilities——同一个元素上再挂 select-none 是
+     盖不住的，要局部剔除就挂到子元素上（user-select 是继承属性，子元素自身
+     的声明必赢）：系统日志整行放开可选、行内时间戳与级别徽标各自挂
+     select-none 把自己排除在选区外，正是这个用法。 */
+  :where(
+    input,
+    textarea,
+    [contenteditable="true"],
+    .markdown,
+    .code-highlight,
+    .selectable
+  ) {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
+}
+
 /* —— 原生 <select> 下拉弹层的 Windows 修复 ——
    弹层由系统/浏览器绘制，Windows 上部分 Chromium（含 WebView）不跟随页面的
    color-scheme: dark，弹层是系统白底；而选项文字继承页面近白色 --text，

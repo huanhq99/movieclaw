@@ -221,6 +221,7 @@ API_PID=""
 WEB_PID=""
 WATCHDOG_PID=""
 NGINX_PID=""
+NGINX_ACTIVE_PORT=""
 SHUTTING_DOWN=0
 # 启动门禁的失败信息由函数写入全局变量。Shell 函数的 return 值只表达成功/失败，
 # 用变量保留子进程真实退出码，才能继续支持 42/43 与 overlay 的失败计数。
@@ -264,6 +265,24 @@ start_nginx() {
     render_nginx_config
     "$NGINX_BIN" -c "$NGINX_RUN_DIR/nginx.conf" -g "daemon off;" &
     NGINX_PID=$!
+    NGINX_ACTIVE_PORT="$WEB_PORT"
+}
+
+# 对外端口在运行期被改（如应用内设置 + 全量重启 43 重新解析出新端口）时：
+# nginx 常驻、不随前后端重启，必须自己换监听口——重新渲染配置后 reload，
+# nginx 会平滑切到新 listen（旧连接由旧 worker 送完）。端口未变时是空操作。
+# 失败只告警不中断：旧端口仍在服务，比起"换口失败把门关了"，保持可达更重要。
+ensure_nginx_port() {
+    if [ "$NGINX_ACTIVE_PORT" = "$WEB_PORT" ] || ! process_is_running "$NGINX_PID"; then
+        return 0
+    fi
+    render_nginx_config
+    if "$NGINX_BIN" -c "$NGINX_RUN_DIR/nginx.conf" -s reload; then
+        echo "[entrypoint] 前门已切换到新的对外端口 $WEB_PORT（原 $NGINX_ACTIVE_PORT）。"
+        NGINX_ACTIVE_PORT="$WEB_PORT"
+    else
+        echo "[entrypoint] 前门切换到端口 $WEB_PORT 失败，仍在 $NGINX_ACTIVE_PORT 上服务。" >&2
+    fi
 }
 
 # 只在容器最终退出时调用：前后端的重启（42/43、overlay 回退）期间 nginx 必须
@@ -489,6 +508,8 @@ start_current_code() {
 
 start_all() {
     resolve_code
+    # 对外端口若在此处被重新解析（运行期改端口 + 43 全量重启），前门随之换口
+    ensure_nginx_port
     start_current_code "$API_STARTUP_TIMEOUT_SECONDS"
 }
 

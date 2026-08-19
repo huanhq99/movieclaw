@@ -9,6 +9,7 @@ entrypoint.sh 提供 `resolve` 测试钩子：只解析启动指向并打印 key
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -60,7 +61,7 @@ def _link(root: Path, name: str, target: Path) -> None:
     link.symlink_to(target)
 
 
-def _resolve(root: Path) -> dict[str, str]:
+def _resolve(root: Path, **extra_env: str) -> dict[str, str]:
     result = subprocess.run(
         ["bash", str(_ENTRYPOINT), "resolve"],
         capture_output=True,
@@ -71,6 +72,7 @@ def _resolve(root: Path) -> dict[str, str]:
             "MOVIECLAW_DATA_DIR": str(root / "data"),
             "MOVIECLAW_RUNTIME_FILE": str(root / "runtime"),
             "MOVIECLAW_PYTHON_BIN": sys.executable,
+            **extra_env,
         },
         check=True,
     )
@@ -155,3 +157,68 @@ def test_ner_model_pointer(env_root: Path) -> None:
     (model / "tokenizer.json").touch()
     (model / "labels.json").touch()
     assert _resolve(env_root)["ner_dir"] == str(model)
+
+
+# ---------------------------------------------------------------------------
+# 对外端口解析（docker/resolve-web-port.sh + entrypoint 的绑定预检）
+# ---------------------------------------------------------------------------
+
+
+def _write_port_file(root: Path, content: str) -> Path:
+    path = root / "data" / "config" / "web-port"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_web_port_defaults_to_3000(env_root: Path) -> None:
+    out = _resolve(env_root)
+    assert (out["web_port"], out["web_port_source"]) == ("3000", "default")
+
+
+def test_web_port_from_env(env_root: Path) -> None:
+    out = _resolve(env_root, MOVIECLAW_WEB_PORT="8096")
+    assert (out["web_port"], out["web_port_source"]) == ("8096", "env")
+
+
+def test_web_port_file_beats_env(env_root: Path) -> None:
+    _write_port_file(env_root, "9123\n")
+    out = _resolve(env_root, MOVIECLAW_WEB_PORT="8096")
+    assert (out["web_port"], out["web_port_source"]) == ("9123", "setting")
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "0", "65536", "99999999999"])
+def test_invalid_port_file_falls_back(env_root: Path, bad: str) -> None:
+    """端口配错是用户手滑，不该让整个容器起不来——忽略并降级即可。"""
+    _write_port_file(env_root, bad)
+    out = _resolve(env_root, MOVIECLAW_WEB_PORT="8096")
+    assert (out["web_port"], out["web_port_source"]) == ("8096", "env")
+
+
+def test_unbindable_setting_port_is_discarded(env_root: Path) -> None:
+    """应用内设置的端口绑不上就废弃回落：用户改端口用的正是这个 Web 界面，
+    起不来就再也进不去了。废弃时留下 .rejected 供设置页外显。"""
+    with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(("0.0.0.0", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        path = _write_port_file(env_root, f"{port}\n")
+        out = _resolve(env_root, MOVIECLAW_WEB_PORT="8096")
+
+    assert (out["web_port"], out["web_port_source"]) == ("8096", "env")
+    assert not path.exists()
+    assert path.with_name("web-port.rejected").read_text().strip() == str(port)
+
+
+def test_unbindable_env_port_is_kept(env_root: Path) -> None:
+    """环境变量是部署者在应用外显式设的：不存在「被自己关在门外」的路径，
+    悄悄改掉反而会与他配的 ports 映射对不上，故保留并让启动如实失败。"""
+    with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(("0.0.0.0", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        out = _resolve(env_root, MOVIECLAW_WEB_PORT=str(port))
+
+    assert (out["web_port"], out["web_port_source"]) == (str(port), "env")

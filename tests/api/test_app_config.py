@@ -17,6 +17,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setenv("SECRET_KEY_FILE", str(tmp_path / ".secret_key"))
     monkeypatch.setenv("SCHEDULER_ENABLED", "false")
+    # 端口设置文件指到临时目录：它是「对外端口」的事实源，绝不能写到仓库的 data/
+    monkeypatch.setenv("MOVIECLAW_WEB_PORT_FILE", str(tmp_path / "config" / "web-port"))
+    monkeypatch.delenv("MOVIECLAW_WEB_PORT", raising=False)
+    monkeypatch.delenv("MOVIECLAW_CODE_SOURCE", raising=False)
     get_settings.cache_clear()
     reset_setting_store()
     reset_secret_box()
@@ -115,3 +119,99 @@ def test_graceful_exit_falls_back_to_sigterm(monkeypatch):
 
     app_config._request_graceful_exit(app_config.RESTART_EXIT_CODE)
     assert signals == [app_config.signal.SIGTERM]
+
+
+# ---------------------------------------------------------------------------
+# 对外端口（PUT /app/port）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def managed(monkeypatch):
+    """伪装成「前端由容器入口托管」的部署（entrypoint 会导出这个变量）。"""
+    monkeypatch.setenv("MOVIECLAW_CODE_SOURCE", "baseline")
+
+
+@pytest.fixture
+def no_restart(monkeypatch):
+    """拦下重启调度，返回被请求的退出码列表。"""
+    codes: list[int] = []
+    monkeypatch.setattr(app_config, "schedule_restart", codes.append)
+    return codes
+
+
+def test_config_view_reports_default_port(client):
+    data = client.get("/api/v1/app/config").json()["data"]
+    assert data["web_port"] == 3000
+    assert data["web_port_source"] == "default"
+    assert data["web_port_default"] == 3000
+    assert data["web_port_rejected"] is None
+    # 测试环境没有 MOVIECLAW_CODE_SOURCE = 非容器入口托管，不给改
+    assert data["web_port_configurable"] is False
+
+
+def test_config_view_reports_env_port(client, monkeypatch):
+    monkeypatch.setenv("MOVIECLAW_WEB_PORT", "8096")
+    data = client.get("/api/v1/app/config").json()["data"]
+    assert (data["web_port"], data["web_port_source"]) == (8096, "env")
+
+
+def test_save_port_rejected_when_not_managed(client, no_restart):
+    resp = client.put("/api/v1/app/port", json={"port": 8096})
+    assert resp.status_code == 400
+    assert "不支持应用内修改端口" in resp.json()["message"]
+    assert no_restart == []
+
+
+def test_save_port_writes_file_and_schedules_full_restart(client, managed, no_restart):
+    resp = client.put("/api/v1/app/port", json={"port": 8096})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert (data["web_port"], data["web_port_source"]) == (8096, "setting")
+    # 事实源是文件，且必须是 entrypoint/resolve-web-port.sh 能直接读的纯数字
+    assert app_config._web_port_file().read_text().strip() == "8096"
+    # 端口是前端监听的，只重后端的 42 换不了端口，必须是 43 全量重启
+    assert no_restart == [app_config.FULL_RESTART_EXIT_CODE]
+
+
+def test_save_port_rejects_backend_port(client, managed, no_restart):
+    resp = client.put("/api/v1/app/port", json={"port": 8000})
+    assert resp.status_code == 400
+    assert no_restart == []
+    assert not app_config._web_port_file().exists()
+
+
+@pytest.mark.parametrize("bad", [0 - 1, 65536, 999999])
+def test_save_port_rejects_out_of_range(client, managed, no_restart, bad):
+    assert client.put("/api/v1/app/port", json={"port": bad}).status_code == 400
+    assert no_restart == []
+
+
+def test_clear_port_restores_default(client, managed, no_restart):
+    client.put("/api/v1/app/port", json={"port": 8096})
+    no_restart.clear()
+    resp = client.put("/api/v1/app/port", json={"port": None})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert (data["web_port"], data["web_port_source"]) == (3000, "default")
+    assert not app_config._web_port_file().exists()
+    assert no_restart == [app_config.FULL_RESTART_EXIT_CODE]
+
+
+def test_saving_same_port_does_not_restart(client, managed, no_restart, monkeypatch):
+    """清掉设置后回落值恰好等于当前端口时不该重启——重启是纯粹的打扰。"""
+    monkeypatch.setenv("MOVIECLAW_WEB_PORT", "8096")
+    client.put("/api/v1/app/port", json={"port": 8096})
+    assert no_restart == []  # setting 与 env 同值，生效端口没变
+
+
+def test_rejected_port_is_surfaced_and_cleared_on_save(client, managed, no_restart):
+    """entrypoint 废弃坏端口后留下的证据要外显，用户重设后清除。"""
+    rejected = app_config._web_port_file().with_name("web-port.rejected")
+    rejected.parent.mkdir(parents=True, exist_ok=True)
+    rejected.write_text("8096\n")
+    assert client.get("/api/v1/app/config").json()["data"]["web_port_rejected"] == 8096
+
+    client.put("/api/v1/app/port", json={"port": 9000})
+    assert not rejected.exists()
+    assert client.get("/api/v1/app/config").json()["data"]["web_port_rejected"] is None

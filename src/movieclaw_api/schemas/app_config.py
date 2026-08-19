@@ -18,4 +18,31 @@ class AppConfigPayload(BaseModel):
 
 
 class AppConfigView(AppConfigPayload):
-    """读取响应：当前与保存请求体同构，独立成类为后续扩展运行时状态留位。"""
+    """读取响应 = 可保存字段 + 对外端口的运行时状态（只读，端口另有专用端点）。
+
+    端口没有并进 ``AppConfigPayload``：其它字段是「失焦即存、保存即生效」，
+    而改端口要重启整个应用、且改错会把用户关在门外，两者的交互语义完全不同，
+    混在一个整体覆盖的请求体里会让改地址时误触发重启。
+    """
+
+    web_port: int = Field(description="当前生效的对外端口（前端监听口）")
+    web_port_source: str = Field(
+        description="端口来源：setting（应用内设置）/ env（环境变量）/ default（默认）"
+    )
+    web_port_default: int = Field(description="内置默认端口，用于「恢复默认」的展示")
+    web_port_rejected: int | None = Field(
+        default=None,
+        description="上次启动时因无法绑定而被自动废弃的端口；null = 无",
+    )
+    web_port_configurable: bool = Field(
+        description="当前部署形态是否支持应用内改端口（仅由容器入口托管进程的 Docker 部署）"
+    )
+
+
+class WebPortPayload(BaseModel):
+    """对外端口的保存请求体（PUT /app/port）。"""
+
+    port: int | None = Field(
+        default=None,
+        description="要监听的对外端口（1~65535）；null 或 0 = 清除设置、恢复默认",
+    )

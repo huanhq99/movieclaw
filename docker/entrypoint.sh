@@ -3,11 +3,13 @@
 # movieclaw 容器入口：一个容器同时跑 FastAPI 后端和 Next.js 前端。
 #
 # 进程模型：
-#   - 后端监听容器内 8000（不对外），前端监听 3000（对外唯一端口）
+#   - 后端监听容器内 8000（不对外），前端监听对外唯一端口（默认 3000，可经
+#     环境变量 MOVIECLAW_WEB_PORT 或应用内「设置 → 应用设置」改，解析规则见
+#     docker/resolve-web-port.sh）
 #   - /api/v1 请求由 Next 服务器反代到后端（构建时固化的 rewrite 规则）
 #   - 后端健康后才启动前端；运行中任意进程退出、或完整健康链路持续失败时，
 #     整个容器退出（交给 Docker 的 restart 策略拉起），避免出现"半死"状态
-#   - 完整启动/重启期间由一个占位服务顶住 3000：页面请求返回「正在启动」并
+#   - 完整启动/重启期间由一个占位服务顶住对外端口：页面请求返回「正在启动」并
 #     自动轮询刷新，/api/* 返回 503——用户看到的是明确的启动状态而不是
 #     浏览器的「无法连接」
 #   - 例外一：后端以约定码 42 退出表示「设置页请求的重启」，只重启后端，
@@ -42,6 +44,10 @@ DATA_DIR="${MOVIECLAW_DATA_DIR:-$APP_ROOT/data}"
 RUNTIME_FILE="${MOVIECLAW_RUNTIME_FILE:-/etc/movieclaw-runtime}"
 UPDATES_DIR="$DATA_DIR/updates"
 STATE_DIR="$UPDATES_DIR/state"
+# 对外端口的应用内设置（「设置 → 应用设置」写入）。放在 data 卷上而不是
+# 数据库里：本脚本和 HEALTHCHECK 都不读数据库，且端口起不来时要就地回落。
+WEB_PORT_FILE="$DATA_DIR/config/web-port"
+export MOVIECLAW_WEB_PORT_FILE="$WEB_PORT_FILE"
 # overlay 启动失败的判定窗口与次数：启动后不足 GRACE 秒即退出算「启动失败」，
 # 同一版本连续失败 MAX 次即标记 bad 并回落
 STARTUP_GRACE_SECONDS="${MOVIECLAW_STARTUP_GRACE_SECONDS:-60}"
@@ -58,7 +64,8 @@ HEALTHCHECK_INTERVAL_SECONDS="${MOVIECLAW_HEALTHCHECK_INTERVAL_SECONDS:-10}"
 HEALTHCHECK_FAILURE_THRESHOLD="${MOVIECLAW_HEALTHCHECK_FAILURE_THRESHOLD:-6}"
 SHUTDOWN_GRACE_SECONDS="${MOVIECLAW_SHUTDOWN_GRACE_SECONDS:-20}"
 API_HEALTH_URL="http://127.0.0.1:8000/api/v1/health"
-WEB_HEALTH_URL="http://127.0.0.1:3000/api/v1/health"
+# WEB_HEALTH_URL 在端口解析后赋值（见 resolve_web_port）
+WEB_HEALTH_URL=""
 # 看门狗以此约定码退出；主循环会把它转换成容器失败退出，不能与后端的 42/43
 # 重启约定混用。
 HEALTH_WATCHDOG_EXIT_CODE=75
@@ -76,6 +83,62 @@ else
     RUNTIME_VERSION=0
 fi
 export MOVIECLAW_RUNTIME_VERSION="$RUNTIME_VERSION"
+
+# ---------------------------------------------------------------------------
+# 对外端口解析
+# ---------------------------------------------------------------------------
+# 端口来源与优先级都在 resolve-web-port.sh 里（设置文件 > 环境变量 > 3000），
+# Docker 的 HEALTHCHECK 调用的是同一个脚本——「前端监听的口」与「健康检查
+# 探的口」必须永远是同一个，各算各的会让用户一改端口容器就被判 unhealthy。
+# 解析脚本与本脚本同目录（镜像里同在 /，仓库里同在 docker/）。去掉 dirname
+# 在根目录下返回的那个斜杠，免得拼出 "//resolve-web-port.sh"。
+_ENTRYPOINT_DIR="$(dirname -- "${BASH_SOURCE[0]}")"
+PORT_RESOLVER="${MOVIECLAW_PORT_RESOLVER:-${_ENTRYPOINT_DIR%/}/resolve-web-port.sh}"
+WEB_PORT=3000
+WEB_PORT_SOURCE=default
+
+# 端口能否真正绑定。这是「应用内改端口」唯一的安全阀：用户改端口用的正是这个
+# Web 界面，新端口若起不来（被占用、非 root 下的特权端口），他就再也进不来了。
+# 因此在拉起任何进程之前先试绑一次——把人关在门外的代价远大于丢一次端口设置。
+# 失败原因原样打进容器日志（"Address already in use" 之类），非开发者也能看懂。
+web_port_is_bindable() {
+    "$PYTHON_BIN" -c '
+import socket, sys
+
+try:
+    with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", int(sys.argv[1])))
+except OSError as exc:
+    print(f"[entrypoint] 端口 {sys.argv[1]} 试绑失败：{exc}", file=sys.stderr)
+    raise SystemExit(1)
+' "$1"
+}
+
+# 跑一次解析脚本并把结果写进全局变量。脚本自身的警告（非法值等）照常进日志。
+apply_resolved_web_port() {
+    local line
+    line="$("$PORT_RESOLVER")" || line="3000 default"
+    WEB_PORT="${line%% *}"
+    WEB_PORT_SOURCE="${line##* }"
+}
+
+# 解析出本次要用的对外端口，并据此定 WEB_HEALTH_URL。
+# 来自设置文件的端口绑不上时就地废弃（改名留证，供设置页外显给用户）并回落。
+resolve_web_port() {
+    # 脚本缺失会一路静默退回 3000，让部署者配的 MOVIECLAW_WEB_PORT 和应用内
+    # 端口设置一起失效——那是「配了没生效」的哑故障，必须先喊出来。
+    if [ ! -r "$PORT_RESOLVER" ]; then
+        echo "[entrypoint] 找不到端口解析脚本 $PORT_RESOLVER：本次退回默认端口 3000，MOVIECLAW_WEB_PORT 与应用内端口设置都不会生效（镜像可能不完整）。" >&2
+    fi
+    apply_resolved_web_port
+    if [ "$WEB_PORT_SOURCE" = "setting" ] && ! web_port_is_bindable "$WEB_PORT"; then
+        echo "[entrypoint] 应用内设置的对外端口 $WEB_PORT 不可用，已废弃该设置并回落。" >&2
+        mv -f "$WEB_PORT_FILE" "$WEB_PORT_FILE.rejected" 2>/dev/null || rm -f "$WEB_PORT_FILE"
+        apply_resolved_web_port
+    fi
+    WEB_HEALTH_URL="http://127.0.0.1:$WEB_PORT/api/v1/health"
+}
 
 # ---------------------------------------------------------------------------
 # overlay 解析
@@ -181,12 +244,15 @@ resolve_code() {
 # 测试钩子：只解析并打印结果，不拉起任何进程
 if [ "${1:-}" = "resolve" ]; then
     resolve_code
+    resolve_web_port
     echo "source=$ACTIVE_SOURCE"
     echo "version=$ACTIVE_VERSION"
     echo "backend_root=$BACKEND_ROOT"
     echo "web_root=$WEB_ROOT"
     echo "runtime=$RUNTIME_VERSION"
     echo "ner_dir=${MOVIECLAW_NER_DIR:-}"
+    echo "web_port=$WEB_PORT"
+    echo "web_port_source=$WEB_PORT_SOURCE"
     exit 0
 fi
 
@@ -199,7 +265,7 @@ cd "$APP_ROOT"
 # 数据库迁移由后端启动时自动执行（movieclaw_db/migrations.py），无需在此处理
 
 # 容器内后端端口显式钉死为 8000：它是 Next 反代目标（构建时固化），
-# 不受部署者环境变量干扰；容器对外端口请改 compose 的 ports 映射。
+# 不受部署者环境变量干扰。对外端口（前端）则可配，见 resolve_web_port。
 API_PID=""
 WEB_PID=""
 WATCHDOG_PID=""
@@ -233,9 +299,9 @@ except Exception:
 ' "$1" >/dev/null 2>&1
 }
 
-# 占位页（纯体验优化，尽力而为）：完整启动/重启期间 3000 端口本来无人监听，
+# 占位页（纯体验优化，尽力而为）：完整启动/重启期间对外端口本来无人监听，
 # 用户浏览器只会看到「无法连接」——对非开发者这与「装坏了」无法区分，而首次
-# 启动的数据迁移可能要几分钟。占位服务先顶住 3000：页面请求返回「正在启动」
+# 启动的数据迁移可能要几分钟。占位服务先顶住对外端口：页面请求返回「正在启动」
 # 并自动轮询健康接口，就绪后自动进入应用；/api/* 一律 503，Docker healthcheck
 # 与设置页的重启轮询都按未就绪处理，不会被占位页误判成健康。
 # 它起不来（如端口未释放）只会在容器日志留一条报错，绝不阻塞真正的启动流程。
@@ -243,6 +309,7 @@ start_placeholder() {
     "$PYTHON_BIN" -c '
 import json
 import socketserver
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PAGE = """<!doctype html>
@@ -312,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
 class PlaceholderServer(ThreadingHTTPServer):
     """跳过 HTTPServer.server_bind 里的 socket.getfqdn() 反向解析。
 
-    占位页的全部价值在于「启动瞬间就顶住 3000」；而 getfqdn 在 DNS 不可达
+    占位页的全部价值在于「启动瞬间就顶住对外端口」；而 getfqdn 在 DNS 不可达
     的部署环境里会阻塞数十秒，反而让占位页错过它要覆盖的那段窗口，用户照
     样看到连接被拒。server_name 只用于生成默认错误页，这里用不到。
     """
@@ -322,8 +389,8 @@ class PlaceholderServer(ThreadingHTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
-PlaceholderServer(("0.0.0.0", 3000), Handler).serve_forever()
-' &
+PlaceholderServer(("0.0.0.0", int(sys.argv[1])), Handler).serve_forever()
+' "$WEB_PORT" &
     PLACEHOLDER_PID=$!
 }
 
@@ -433,9 +500,9 @@ start_api() {
 }
 
 start_web() {
-    echo "[entrypoint] 启动前端 (Next.js, 0.0.0.0:3000)……来源：$ACTIVE_SOURCE${ACTIVE_VERSION:+ v$ACTIVE_VERSION}"
+    echo "[entrypoint] 启动前端 (Next.js, 0.0.0.0:${WEB_PORT}，端口来源：${WEB_PORT_SOURCE})……来源：$ACTIVE_SOURCE${ACTIVE_VERSION:+ v$ACTIVE_VERSION}"
     WEB_START_TS="$(date +%s)"
-    PORT=3000 HOSTNAME=0.0.0.0 node "$WEB_ROOT/apps/web/server.js" &
+    PORT="$WEB_PORT" HOSTNAME=0.0.0.0 node "$WEB_ROOT/apps/web/server.js" &
     WEB_PID=$!
 }
 
@@ -525,7 +592,7 @@ start_current_code() {
         START_FAILURE_IS_TIMEOUT="$WAIT_TIMED_OUT"
         return 1
     fi
-    # 释放 3000 给真正的前端；占位页里的轮询脚本会在前端就绪后自动进入应用
+    # 释放对外端口给真正的前端；占位页里的轮询脚本会在前端就绪后自动进入应用
     stop_placeholder
     start_web
     if ! wait_for_health "前端反代" "$WEB_PID" "$WEB_HEALTH_URL" "$WEB_STARTUP_TIMEOUT_SECONDS" \
@@ -541,12 +608,15 @@ start_current_code() {
 
 start_all() {
     resolve_code
+    # 端口与代码来源一样每次全量启动都重新解析：设置页改端口正是通过 43
+    # 全量重启生效的（42 只重后端，前端不动，端口自然也不变）。
+    resolve_web_port
     start_current_code "$API_STARTUP_TIMEOUT_SECONDS"
 }
 
 # 设置页重启（42）的快速路径：只重启后端，前端进程与用户的页面会话保持不动。
 # 后端不可用的窗口内 API 反代会短暂 502，但发起重启的页面本就处于轮询等待态；
-# 相比连前端一起冷重启，窗口更短、3000 端口也不会整体消失。看门狗必须先停——
+# 相比连前端一起冷重启，窗口更短、对外端口也不会整体消失。看门狗必须先停——
 # 否则窗口内预期的探测失败会被计成故障、把容器杀掉。代码来源保持当前已解析
 # 版本，不会误切 overlay。
 restart_api_keeping_web() {

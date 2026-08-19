@@ -135,10 +135,16 @@ export function SettingsPanel({ active }: SettingsPanelProps) {
     // 背景透明，让蒙版透上来。沉浸式深色底，不再有圆角/描边/透出雪原的大卡片。
     // 头部与内容同列（同一 max-w 容器内），避免「标题贴左上、内容居中」的割裂感。
     <div className="scroll-thin scroll-safe h-full overflow-y-auto">
-      {/* 日志分区放宽到 4xl：日志行信息密度高，窄容器折行太碎 */}
+      {/* 分区按信息密度给宽度：日志行最密（4xl）；资源站点一行要放
+          名称 + 状态 + 刷流读数 + 操作，展开后还有成排统计，2xl 太挤（3xl）；
+          其余表单类分区维持 2xl 的舒适阅读宽度 */}
       <div
         className={`mx-auto w-full px-6 pb-20 pt-12 max-md:px-4 max-md:pb-12 max-md:pt-6 ${
-          section.id === "logs" ? "max-w-4xl" : "max-w-2xl"
+          section.id === "logs"
+            ? "max-w-4xl"
+            : section.id === "sites"
+              ? "max-w-3xl"
+              : "max-w-2xl"
         }`}
       >
         <header className="flex items-center gap-4">

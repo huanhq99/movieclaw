@@ -50,6 +50,10 @@ import { useVisiblePolling } from "@/lib/use-visible-polling";
  *   P1 条件徽章：保护中 / 刷流用量与近 24h 产出——开了才出现，不开不占版面；
  *   P2 展开可见：账号统计 / 索引同步 / 刷流设置 / 授权信息；
  *   操作全收进 ⋯ 菜单（启停 / 保护 / 重验 / 删除），卡面只留信息。
+ * 展开详情的排版：段标签在桌面抽成左侧固定列（各段内容左缘对齐、统计纵向成列），
+ *   统计走等宽列（2 → 3 → 4 列）+ 等宽数字，段与段之间用发丝线分隔——
+ *   替代原来的「标签在上 + 自然排布」，后者在宽屏上列宽参差、留白散。
+ *   统计刻意不加底色小卡：层级靠对齐与字重撑住，加卡片会把这页的「轻」丢掉。
  * 视觉刻意不用玻璃质感与 WebGL 开关：配置页要的是轻和稳（移动端尤其），
  * 玻璃留给首页与海报墙等展示面。移动端徽章行自动折到第二行，整行是
  * 展开热区。异常站点置顶 + 顶部健康摘要，把「是否正常」从逐卡看变成一行知。
@@ -559,7 +563,9 @@ function SiteRow({
             onToggle();
           }
         }}
-        className="flex min-h-[52px] cursor-pointer flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 transition-colors hover:bg-white/[0.03]"
+        className={`group flex min-h-[52px] cursor-pointer flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/25 sm:px-5 sm:py-3 ${
+          expanded ? "bg-white/[0.045]" : ""
+        }`}
       >
         {/* P0：徽标 + 名称 + 状态 */}
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
@@ -621,10 +627,12 @@ function SiteRow({
         )}
 
         {/* 控制区：展开箭头 + 操作菜单 */}
-        <div className="flex shrink-0 items-center gap-1">
-          <ChevronDownIcon
-            className={`size-4 text-[var(--text-faint)] transition-transform ${expanded ? "rotate-180" : ""}`}
-          />
+        <div className="flex shrink-0 items-center gap-0.5">
+          <span className="flex size-7 items-center justify-center rounded-full text-[var(--text-faint)] transition-colors group-hover:bg-white/[0.08] group-hover:text-[var(--text-muted)]">
+            <ChevronDownIcon
+              className={`size-4 transition-transform ${expanded ? "rotate-180" : ""}`}
+            />
+          </span>
           <SiteActionsMenu
             site={site}
             busy={busy}
@@ -720,11 +728,11 @@ function SiteDetail({
   onCloseEditAuth,
 }: SiteDetailProps) {
   return (
-    <div className="space-y-4 border-t border-white/[0.06] bg-white/[0.02] px-4 py-4">
+    <div className="divide-y divide-white/[0.05] border-t border-white/[0.06] bg-white/[0.02] px-4 py-3 sm:px-5">
       {/* ─ 刷流 ─ 只读运行统计；启停与预算在 ⋯ 菜单（带二次确认与预算弹窗） */}
       {site.boost_enabled && (
         <DetailSection label="刷流">
-          <div className="grid grid-cols-2 gap-x-5 gap-y-2 sm:flex sm:flex-wrap sm:gap-x-7">
+          <StatGrid>
             <DetailStat
               label="已用 / 预算"
               value={`${formatBytes(boost?.used_bytes ?? 0)} / ${formatBytes(site.boost_budget_bytes)}`}
@@ -741,9 +749,9 @@ function SiteDetail({
             {boost && boost.evicted_count > 0 && (
               <DetailStat label="已汰换" value={String(boost.evicted_count)} />
             )}
-          </div>
+          </StatGrid>
           {boost && boost.avg_used_bytes_24h > 0 && (
-            <p className="text-caption text-[var(--text-muted)]">
+            <p className="text-caption leading-5 text-[var(--text-muted)]">
               近 24 小时：{formatBytes(boost.avg_used_bytes_24h)} 在池种子贡献了{" "}
               {formatBytes(boost.uploaded_bytes_24h)} 上传
               {boost.avg_used_bytes_7d > 0 &&
@@ -760,7 +768,7 @@ function SiteDetail({
             className="space-y-2.5"
             title={`资料更新于 ${formatRelativeTime(site.profile.fetched_at)}`}
           >
-            <div className="grid grid-cols-2 gap-x-5 gap-y-2 sm:flex sm:flex-wrap sm:gap-x-7">
+            <StatGrid>
               <DetailStat label="用户名" value={site.profile.username} />
               {site.profile.user_class && (
                 <DetailStat label="等级" value={site.profile.user_class} />
@@ -769,12 +777,12 @@ function SiteDetail({
               {site.profile.bonus != null && (
                 <DetailStat label="魔力" value={formatCompact(site.profile.bonus)} />
               )}
-            </div>
-            <div className="grid grid-cols-2 gap-x-5 gap-y-2 sm:flex sm:flex-wrap sm:gap-x-7">
+            </StatGrid>
+            <StatGrid>
               <DetailStat label="上传量" value={formatBytes(site.profile.uploaded_bytes)} />
               <DetailStat label="下载量" value={formatBytes(site.profile.downloaded_bytes)} />
               <DetailStat label="分享率" value={formatRatio(site.profile.ratio)} />
-            </div>
+            </StatGrid>
           </div>
         </DetailSection>
       )}
@@ -782,7 +790,7 @@ function SiteDetail({
       {/* ─ 索引 ─ */}
       {stats && (
         <DetailSection label="索引">
-          <div className="grid grid-cols-2 gap-x-5 gap-y-2 sm:flex sm:flex-wrap sm:gap-x-7">
+          <StatGrid>
             <DetailStat
               label="已缓存种子"
               value={stats.torrent_count.toLocaleString("zh-CN")}
@@ -792,9 +800,9 @@ function SiteDetail({
             {stats.sync_interval_seconds != null && (
               <DetailStat label="同步间隔" value={formatDuration(stats.sync_interval_seconds)} />
             )}
-          </div>
+          </StatGrid>
           {stats.last_error && (
-            <p className="text-caption text-[#ff6b6b]">上次同步失败：{stats.last_error}</p>
+            <p className="text-caption leading-5 text-[#ff6b6b]">上次同步失败：{stats.last_error}</p>
           )}
         </DetailSection>
       )}
@@ -814,10 +822,10 @@ function SiteDetail({
             }
           />
         ) : (
-          <span className="text-sub text-[var(--text-muted)]">
+          <p className="text-sub leading-6 text-[var(--text-muted)]">
             {AUTH_TYPE_LABEL[site.auth_type]} · 上次检查{" "}
             {formatRelativeTime(site.last_checked_at)}
-          </span>
+          </p>
         )}
       </DetailSection>
     </div>
@@ -1150,21 +1158,43 @@ function SiteBadge({ item }: { item: CatalogItem }) {
   );
 }
 
-/** 详情分段：小标题 + 内容，统一四段的视觉节奏 */
+/**
+ * 详情分段：桌面把段标签抽成左侧固定列（内容区左缘因此对齐，
+ * 各段的统计格子在纵向也成列），窄屏回落成「标签在上、内容在下」。
+ */
 function DetailSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-2">
-      <p className="text-micro font-medium tracking-wide text-[var(--text-faint)]">{label}</p>
+    <section className="grid gap-1.5 py-3 first:pt-1 last:pb-1 sm:grid-cols-[46px_minmax(0,1fr)] sm:gap-x-4 sm:gap-y-0">
+      <p className="text-micro font-medium tracking-wide text-[var(--text-faint)] sm:pt-2">
+        {label}
+      </p>
+      <div className="min-w-0 space-y-2">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * 统计区容器：等宽列（2 → 3 → 4 列）。
+ * 刻意不给底色和描边——层级全靠列对齐与字重/明暗分层撑住，
+ * 配置页要的是克制，加一圈卡片底色反而把「轻」丢了。
+ */
+function StatGrid({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-2 gap-x-5 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
       {children}
     </div>
   );
 }
 
+/** 单个统计：淡色小标签在上、数值在下；数值走等宽数字，纵向列里数位对齐 */
 function DetailStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <p className="text-micro text-[var(--text-faint)]">{label}</p>
-      <p className="mt-0.5 truncate text-ui font-semibold text-[var(--text)]">{value}</p>
+      <p className="truncate text-micro text-[var(--text-faint)]">{label}</p>
+      {/* 移动端降一档字号：窄屏两列下「998 GB / 1000 GB」这类长值按 text-ui 会被截断 */}
+      <p className="mt-0.5 truncate text-ui font-semibold tabular-nums text-[var(--text)] max-sm:text-sub">
+        {value}
+      </p>
     </div>
   );
 }

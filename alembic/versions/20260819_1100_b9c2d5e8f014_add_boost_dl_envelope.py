@@ -8,7 +8,7 @@
 即可，回退不丢数据。
 
 Revision ID: b9c2d5e8f014
-Revises: a8b1c4d7e903
+Revises: c2e5f8a1b436
 Create Date: 2026-08-19 11:00:00.000000
 """
 
@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "b9c2d5e8f014"
-down_revision: str | None = "a8b1c4d7e903"
+down_revision: str | None = "c2e5f8a1b436"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

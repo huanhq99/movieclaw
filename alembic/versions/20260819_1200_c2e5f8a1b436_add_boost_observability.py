@@ -17,8 +17,8 @@
 向前兼容说明：全部为加列（nullable 或 server_default=0）与新表，旧代码
 忽略即可，回退不丢数据。
 
-Revision ID: a8b1c4d7e903
-Revises: f7a0b3c6d892
+Revision ID: c2e5f8a1b436
+Revises: a8b1c4d7e903
 Create Date: 2026-08-18 15:00:00.000000
 """
 
@@ -29,8 +29,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "a8b1c4d7e903"
-down_revision: str | None = "f7a0b3c6d892"
+revision: str = "c2e5f8a1b436"
+down_revision: str | None = "a8b1c4d7e903"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

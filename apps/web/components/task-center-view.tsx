@@ -963,8 +963,10 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
           <span className="tnum text-caption text-white/60">{tasks.length} 个种子</span>
           {/* 实时汇总：速度是"现在"，总量是"战果"——都放头部，折叠时也一眼可见。
               上传走 --ok 绿（刷流的战果就是上传量），下载走 --info 蓝，数值带淡辉光
-              从灰色标签里跳出来；标签本身保持浅灰，让数字成为视觉焦点。 */}
-          <span className="tnum flex flex-wrap items-center gap-x-3 text-caption text-white/45">
+              从灰色标签里跳出来；标签本身保持浅灰，让数字成为视觉焦点。
+              窄屏这四项塞不进标题行，整块换到第二行（order-2 + w-full）独占一行，
+              避免和"展开"挤在一起互相把对方顶出去。 */}
+          <span className="tnum flex flex-wrap items-center gap-x-3 text-caption text-white/45 max-md:order-2 max-md:w-full">
             {/* 上下行速度常显：为 0 时退成灰色占位，让"现在没在下载"也是一条信息 */}
             <SpeedStat direction="up" bytesPerSecond={upSpeed} glow placeholder="↑ 0 B/s" />
             <SpeedStat direction="down" bytesPerSecond={downSpeed} glow placeholder="↓ 0 B/s" />
@@ -975,9 +977,14 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
               已下载 <span className="font-semibold text-[var(--info)]">{formatBytes(downloaded)}</span>
             </span>
           </span>
-          <span className="ml-auto text-caption text-white/30 group-open:hidden">展开</span>
-          <span className="ml-auto hidden text-caption text-white/30 group-open:inline">收起</span>
-          <ChevronRightIcon className="size-4 text-white/30 transition-transform group-open:rotate-90" />
+          {/* 展开态文案和箭头必须同进同退，所以包在一个不可换行的组里：上一版两者是
+              summary 的兄弟节点，窄屏换行时箭头会被单独甩到下一行成为孤儿。
+              窄屏 order-1 让它跟在"N 个种子"后面停在标题行右端。 */}
+          <span className="ml-auto flex shrink-0 items-center gap-1 whitespace-nowrap text-caption text-white/30 max-md:order-1">
+            <span className="group-open:hidden">展开</span>
+            <span className="hidden group-open:inline">收起</span>
+            <ChevronRightIcon className="size-4 transition-transform group-open:rotate-90" />
+          </span>
         </summary>
         <div className="mt-2 divide-y divide-white/[0.05]">
           {sorted.map((task) => (

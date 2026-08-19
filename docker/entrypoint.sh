@@ -1,14 +1,19 @@
 #!/bin/bash
 # =============================================================================
-# movieclaw 容器入口：一个容器同时跑 FastAPI 后端和 Next.js 前端。
+# movieclaw 容器入口：一个容器同时跑 nginx 前门、FastAPI 后端和 Next.js 前端。
 #
 # 进程模型：
-#   - 后端监听容器内 8000（不对外），前端监听 3000（对外唯一端口）
-#   - /api/v1 请求由 Next 服务器反代到后端（构建时固化的 rewrite 规则）
+#   - nginx 监听对外唯一端口 3000，容器启动第一件事就是拉起它，并在容器整个
+#     生命周期内一直在（前后端怎么重启它都不动，端口永不消失）。路由见
+#     docker/nginx.conf.template：/api/v1 与 Jellyfin 命名空间直达后端
+#     （播放器取流/下载不再经过 Node，每 GB 省约 10 个 CPU 秒），其余交给 Next
+#   - 后端监听容器内 127.0.0.1:8000，前端监听容器内 127.0.0.1:3001，都不对外
+#   - Next 自己的 /api/v1 rewrite 仍保留（裸机开发不经 nginx 时用），容器里
+#     只是多一条不会被走到的备胎
 #   - 后端健康后才启动前端；运行中任意进程退出、或完整健康链路持续失败时，
 #     整个容器退出（交给 Docker 的 restart 策略拉起），避免出现"半死"状态
-#   - 完整启动/重启期间由一个占位服务顶住 3000：页面请求返回「正在启动」并
-#     自动轮询刷新，/api/* 返回 503——用户看到的是明确的启动状态而不是
+#   - 完整启动/重启期间由 nginx 代答：上游连不上时页面请求返回「正在启动」
+#     并自动轮询刷新，/api/* 返回 503——用户看到的是明确的启动状态而不是
 #     浏览器的「无法连接」
 #   - 例外一：后端以约定码 42 退出表示「设置页请求的重启」，只重启后端，
 #     前端进程保持运行（窗口内 API 反代短暂 502，发起重启的页面本就在轮询
@@ -57,8 +62,20 @@ WEB_STARTUP_TIMEOUT_SECONDS="${MOVIECLAW_WEB_STARTUP_TIMEOUT_SECONDS:-60}"
 HEALTHCHECK_INTERVAL_SECONDS="${MOVIECLAW_HEALTHCHECK_INTERVAL_SECONDS:-10}"
 HEALTHCHECK_FAILURE_THRESHOLD="${MOVIECLAW_HEALTHCHECK_FAILURE_THRESHOLD:-6}"
 SHUTDOWN_GRACE_SECONDS="${MOVIECLAW_SHUTDOWN_GRACE_SECONDS:-20}"
+# 对外端口：nginx 监听它，也是 Docker HEALTHCHECK 探测的口
+WEB_PORT=3000
+# Next 在容器内的监听口（只给 nginx 反代用）
+NEXT_PORT=3001
 API_HEALTH_URL="http://127.0.0.1:8000/api/v1/health"
-WEB_HEALTH_URL="http://127.0.0.1:3000/api/v1/health"
+# 前端直连探测：穿过 Next 自己的 /api/v1 rewrite 到后端，验证 Next 进程本身可用
+WEB_HEALTH_URL="http://127.0.0.1:$NEXT_PORT/api/v1/health"
+# 对外完整链路探测：nginx → 后端，即用户/Docker healthcheck 实际走的路径
+FRONT_HEALTH_URL="http://127.0.0.1:$WEB_PORT/api/v1/health"
+# nginx 的二进制、配置模板与占位页资源；测试用替身覆盖
+NGINX_BIN="${MOVIECLAW_NGINX_BIN:-nginx}"
+NGINX_TEMPLATE="${MOVIECLAW_NGINX_TEMPLATE:-/etc/movieclaw/nginx.conf.template}"
+NGINX_ASSETS_DIR="${MOVIECLAW_NGINX_ASSETS_DIR:-/usr/share/movieclaw}"
+NGINX_RUN_DIR="${MOVIECLAW_NGINX_RUN_DIR:-/run/movieclaw}"
 # 看门狗以此约定码退出；主循环会把它转换成容器失败退出，不能与后端的 42/43
 # 重启约定混用。
 HEALTH_WATCHDOG_EXIT_CODE=75
@@ -198,12 +215,12 @@ cd "$APP_ROOT"
 
 # 数据库迁移由后端启动时自动执行（movieclaw_db/migrations.py），无需在此处理
 
-# 容器内后端端口显式钉死为 8000：它是 Next 反代目标（构建时固化），
-# 不受部署者环境变量干扰；容器对外端口请改 compose 的 ports 映射。
+# 容器内后端端口显式钉死为 8000：它是 nginx 与 Next 的反代目标（后者构建时
+# 固化），不受部署者环境变量干扰；容器对外端口请改 compose 的 ports 映射。
 API_PID=""
 WEB_PID=""
 WATCHDOG_PID=""
-PLACEHOLDER_PID=""
+NGINX_PID=""
 SHUTTING_DOWN=0
 # 启动门禁的失败信息由函数写入全局变量。Shell 函数的 return 值只表达成功/失败，
 # 用变量保留子进程真实退出码，才能继续支持 42/43 与 overlay 的失败计数。
@@ -233,108 +250,33 @@ except Exception:
 ' "$1" >/dev/null 2>&1
 }
 
-# 占位页（纯体验优化，尽力而为）：完整启动/重启期间 3000 端口本来无人监听，
-# 用户浏览器只会看到「无法连接」——对非开发者这与「装坏了」无法区分，而首次
-# 启动的数据迁移可能要几分钟。占位服务先顶住 3000：页面请求返回「正在启动」
-# 并自动轮询健康接口，就绪后自动进入应用；/api/* 一律 503，Docker healthcheck
-# 与设置页的重启轮询都按未就绪处理，不会被占位页误判成健康。
-# 它起不来（如端口未释放）只会在容器日志留一条报错，绝不阻塞真正的启动流程。
-start_placeholder() {
-    "$PYTHON_BIN" -c '
-import json
-import socketserver
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-PAGE = """<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>movieclaw 正在启动</title>
-<style>
-  body { margin: 0; min-height: 100vh; display: flex; align-items: center;
-         justify-content: center; background: #0b0f17; color: #e2e8f0;
-         font-family: system-ui, sans-serif; }
-  .card { text-align: center; padding: 2rem; max-width: 32rem; }
-  .spin { margin: 0 auto 1.25rem; width: 2rem; height: 2rem; border-radius: 50%;
-          border: 3px solid rgba(226,232,240,.25); border-top-color: #e2e8f0;
-          animation: r 1s linear infinite; }
-  @keyframes r { to { transform: rotate(360deg); } }
-  p { margin: .4rem 0; }
-  .sub { color: #94a3b8; font-size: .875rem; }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="spin"></div>
-  <p>movieclaw 正在启动，请稍候……</p>
-  <p class="sub">首次启动或更新后可能需要执行数据迁移，通常几秒到几分钟。就绪后本页会自动进入应用。</p>
-</div>
-<script>
-setInterval(function () {
-  fetch("/api/v1/health").then(function (r) {
-    if (r.ok) { location.reload(); }
-  }).catch(function () {});
-}, 2000);
-</script>
-</body>
-</html>
-""".encode("utf-8")
-
-API_BODY = json.dumps(
-    {"success": False, "code": "APP_STARTING", "message": "应用正在启动，请稍候", "details": None},
-    ensure_ascii=False,
-).encode("utf-8")
-
-
-class Handler(BaseHTTPRequestHandler):
-    def _respond(self, status, ctype, body):
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
-
-    def do_GET(self):
-        if self.path.startswith("/api/"):
-            self._respond(503, "application/json; charset=utf-8", API_BODY)
-        else:
-            self._respond(200, "text/html; charset=utf-8", PAGE)
-
-    do_HEAD = do_GET
-
-    def log_message(self, fmt, *args):
-        pass
-
-
-class PlaceholderServer(ThreadingHTTPServer):
-    """跳过 HTTPServer.server_bind 里的 socket.getfqdn() 反向解析。
-
-    占位页的全部价值在于「启动瞬间就顶住 3000」；而 getfqdn 在 DNS 不可达
-    的部署环境里会阻塞数十秒，反而让占位页错过它要覆盖的那段窗口，用户照
-    样看到连接被拒。server_name 只用于生成默认错误页，这里用不到。
-    """
-
-    def server_bind(self):
-        socketserver.TCPServer.server_bind(self)
-        self.server_name, self.server_port = self.server_address[:2]
-
-
-PlaceholderServer(("0.0.0.0", 3000), Handler).serve_forever()
-' &
-    PLACEHOLDER_PID=$!
+# nginx 前门：渲染配置（替换端口与资源目录占位符）后以前台模式拉起，
+# 和前后端一样由本脚本监督——它一退出容器就退出。启动失败（配置错误、端口
+# 被占）属于镜像/环境问题，原因由 nginx 自己打到 stderr，不做重试。
+render_nginx_config() {
+    mkdir -p "$NGINX_RUN_DIR"
+    sed -e "s|__WEB_PORT__|$WEB_PORT|g" -e "s|__ASSETS_DIR__|$NGINX_ASSETS_DIR|g" \
+        "$NGINX_TEMPLATE" > "$NGINX_RUN_DIR/nginx.conf"
 }
 
-stop_placeholder() {
-    if process_is_running "$PLACEHOLDER_PID"; then
-        kill "$PLACEHOLDER_PID" 2>/dev/null || true
+start_nginx() {
+    echo "[entrypoint] 启动前门 (nginx, 0.0.0.0:$WEB_PORT)……"
+    render_nginx_config
+    "$NGINX_BIN" -c "$NGINX_RUN_DIR/nginx.conf" -g "daemon off;" &
+    NGINX_PID=$!
+}
+
+# 只在容器最终退出时调用：前后端的重启（42/43、overlay 回退）期间 nginx 必须
+# 一直在，这样对外端口不消失、窗口内用户看到的是占位页而不是连接被拒。
+stop_nginx() {
+    if process_is_running "$NGINX_PID"; then
+        # nginx 前台模式对 TERM 是快速关闭；等它把 worker 带走
+        kill "$NGINX_PID" 2>/dev/null || true
     fi
-    if [ -n "$PLACEHOLDER_PID" ]; then
-        wait "$PLACEHOLDER_PID" 2>/dev/null || true
+    if [ -n "$NGINX_PID" ]; then
+        wait "$NGINX_PID" 2>/dev/null || true
     fi
-    PLACEHOLDER_PID=""
+    NGINX_PID=""
 }
 
 # 异常退出前把原因落盘（$STATE_DIR/last-exit.json）。容器随后会被 Docker 拉起，
@@ -433,34 +375,44 @@ start_api() {
 }
 
 start_web() {
-    echo "[entrypoint] 启动前端 (Next.js, 0.0.0.0:3000)……来源：$ACTIVE_SOURCE${ACTIVE_VERSION:+ v$ACTIVE_VERSION}"
+    echo "[entrypoint] 启动前端 (Next.js, 127.0.0.1:$NEXT_PORT)……来源：$ACTIVE_SOURCE${ACTIVE_VERSION:+ v$ACTIVE_VERSION}"
     WEB_START_TS="$(date +%s)"
-    PORT=3000 HOSTNAME=0.0.0.0 node "$WEB_ROOT/apps/web/server.js" &
+    PORT="$NEXT_PORT" HOSTNAME=127.0.0.1 node "$WEB_ROOT/apps/web/server.js" &
     WEB_PID=$!
 }
 
-# 运行期看门狗验证完整的「Next → rewrite → FastAPI」链路。Docker HEALTHCHECK
-# 只能标记 unhealthy，restart policy 不会因该状态自动重启；由入口脚本主动失败
-# 退出，Docker 才能可靠地拉起一个全新的进程组。
+# 运行期看门狗验证两条链路：对外的「nginx → FastAPI」（用户与 Docker
+# HEALTHCHECK 实际走的）和「Next → rewrite → FastAPI」（前端进程可用）。
+# Docker HEALTHCHECK 只能标记 unhealthy，restart policy 不会因该状态自动重启；
+# 由入口脚本主动失败退出，Docker 才能可靠地拉起一个全新的进程组。
 start_health_watchdog() {
     (
-        local failures=0 reason segment
+        local failures=0 reason segment failed_url
         while true; do
             sleep "$HEALTHCHECK_INTERVAL_SECONDS"
-            if probe_health "$WEB_HEALTH_URL"; then
+            if probe_health "$FRONT_HEALTH_URL" && probe_health "$WEB_HEALTH_URL"; then
                 failures=0
                 continue
             fi
             failures=$(( failures + 1 ))
             # 失败时补一次后端直连探测做分段归因：完整链路断了，先分清是
             # 后端故障还是前端/反代故障，用户贴日志时就能直接定位到出问题的层。
-            reason="$(describe_health_failure "$WEB_HEALTH_URL")"
+            if probe_health "$FRONT_HEALTH_URL"; then
+                failed_url="$WEB_HEALTH_URL"
+            else
+                failed_url="$FRONT_HEALTH_URL"
+            fi
+            reason="$(describe_health_failure "$failed_url")"
             if probe_health "$API_HEALTH_URL"; then
-                segment="后端直连正常，疑似前端或反代故障"
+                if [ "$failed_url" = "$WEB_HEALTH_URL" ]; then
+                    segment="后端直连正常，疑似前端（Next）故障"
+                else
+                    segment="后端直连正常，疑似 nginx 前门故障"
+                fi
             else
                 segment="后端直连亦失败，疑似后端故障"
             fi
-            echo "[entrypoint] 完整健康链路检查失败（$failures/${HEALTHCHECK_FAILURE_THRESHOLD}）：${WEB_HEALTH_URL}（原因：${reason}；${segment}）" >&2
+            echo "[entrypoint] 完整健康链路检查失败（$failures/${HEALTHCHECK_FAILURE_THRESHOLD}）：${failed_url}（原因：${reason}；${segment}）" >&2
             if [ "$failures" -ge "$HEALTHCHECK_FAILURE_THRESHOLD" ]; then
                 echo "[entrypoint] 完整健康链路连续失败，停止容器以触发 Docker 重启。" >&2
                 exit "$HEALTH_WATCHDOG_EXIT_CODE"
@@ -485,7 +437,6 @@ stop_health_watchdog() {
 terminate_managed_processes() {
     local deadline now pid
     stop_health_watchdog
-    stop_placeholder
     for pid in "$API_PID" "$WEB_PID"; do
         if process_is_running "$pid"; then
             kill "$pid" 2>/dev/null || true
@@ -517,7 +468,6 @@ terminate_managed_processes() {
 # 任一阶段失败时，前端都不会在后端不可用的状态下对外提供反代。
 start_current_code() {
     local api_timeout="${1:-$API_STARTUP_TIMEOUT_SECONDS}"
-    start_placeholder
     start_api
     if ! wait_for_health "后端" "$API_PID" "$API_HEALTH_URL" "$api_timeout"; then
         START_FAILURE_CODE="$WAIT_FAILURE_CODE"
@@ -525,8 +475,6 @@ start_current_code() {
         START_FAILURE_IS_TIMEOUT="$WAIT_TIMED_OUT"
         return 1
     fi
-    # 释放 3000 给真正的前端；占位页里的轮询脚本会在前端就绪后自动进入应用
-    stop_placeholder
     start_web
     if ! wait_for_health "前端反代" "$WEB_PID" "$WEB_HEALTH_URL" "$WEB_STARTUP_TIMEOUT_SECONDS" \
         "后端" "$API_PID"; then
@@ -617,7 +565,7 @@ handle_startup_failure() {
 # trap 必须先于 start_all 安装：启动窗口内到达的 TERM 不能被 PID 1 默认忽略。
 shutdown() {
     SHUTTING_DOWN=1
-    kill "${API_PID:-}" "${WEB_PID:-}" "${WATCHDOG_PID:-}" "${PLACEHOLDER_PID:-}" 2>/dev/null || true
+    kill "${API_PID:-}" "${WEB_PID:-}" "${WATCHDOG_PID:-}" "${NGINX_PID:-}" 2>/dev/null || true
 }
 trap shutdown TERM INT
 
@@ -665,6 +613,8 @@ identify_exited_process() {
         EXITED_PID="$WEB_PID"
     elif ! process_is_running "$WATCHDOG_PID"; then
         EXITED_PID="$WATCHDOG_PID"
+    elif ! process_is_running "$NGINX_PID"; then
+        EXITED_PID="$NGINX_PID"
     fi
     [ -n "$EXITED_PID" ]
 }
@@ -689,18 +639,18 @@ wait_for_managed_process_exit() {
     if [ "${BASH_VERSINFO[0]}" -gt 5 ] \
         || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; then
         EXITED_PID=""
-        wait -n -p EXITED_PID "$API_PID" "$WEB_PID" "$WATCHDOG_PID" && EXIT_CODE=0 || EXIT_CODE=$?
+        wait -n -p EXITED_PID "$API_PID" "$WEB_PID" "$WATCHDOG_PID" "$NGINX_PID" && EXIT_CODE=0 || EXIT_CODE=$?
         # 被信号打断时 -p 可能未写入 PID；交给后续逻辑按停机处理，绝不猜测。
         return
     fi
     if [ "${BASH_VERSINFO[0]}" -gt 4 ] \
         || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; }; then
-        wait -n "$API_PID" "$WEB_PID" "$WATCHDOG_PID" && EXIT_CODE=0 || EXIT_CODE=$?
+        wait -n "$API_PID" "$WEB_PID" "$WATCHDOG_PID" "$NGINX_PID" && EXIT_CODE=0 || EXIT_CODE=$?
         identify_exited_process || true
         return
     fi
     while process_is_running "$API_PID" && process_is_running "$WEB_PID" \
-        && process_is_running "$WATCHDOG_PID"; do
+        && process_is_running "$WATCHDOG_PID" && process_is_running "$NGINX_PID"; do
         if [ "$SHUTTING_DOWN" -eq 1 ]; then
             EXITED_PID=""
             return
@@ -713,6 +663,9 @@ wait_for_managed_process_exit() {
 }
 
 EXIT_CODE=143
+# nginx 先于一切拉起并常驻：对外端口从此刻起就有人应答（启动期回占位页），
+# 前后端的任何重启都不再让端口消失。
+start_nginx
 if ! boot_until_running; then
     if [ "$SHUTTING_DOWN" -eq 1 ]; then
         EXIT_CODE=143
@@ -731,8 +684,9 @@ while true; do
     if [ "$SHUTTING_DOWN" -eq 1 ]; then
         break # 停机信号已到：无论进程处于什么状态都直接走停机流程
     fi
-    if [ -z "$EXITED_PID" ] && kill -0 "$API_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null; then
-        break # 两个进程都活着 = wait 被停止信号打断（docker stop）：走停机流程
+    if [ -z "$EXITED_PID" ] && kill -0 "$API_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null \
+        && kill -0 "$NGINX_PID" 2>/dev/null; then
+        break # 进程都活着 = wait 被停止信号打断（docker stop）：走停机流程
     fi
     if [ "$EXITED_PID" = "$API_PID" ]; then
         # 后端退出：先看重启约定码
@@ -785,6 +739,14 @@ while true; do
         record_failure_exit web_crash "$EXIT_CODE" "前端进程异常退出"
         break # 前端真故障：结束容器
     fi
+    if [ "$EXITED_PID" = "$NGINX_PID" ]; then
+        echo "[entrypoint] nginx 前门退出（exit=${EXIT_CODE}），停止容器。" >&2
+        if [ "$EXIT_CODE" -eq 0 ]; then
+            EXIT_CODE=1
+        fi
+        record_failure_exit nginx_crash "$EXIT_CODE" "nginx 前门进程异常退出"
+        break
+    fi
     if [ "$EXITED_PID" = "$WATCHDOG_PID" ]; then
         if [ "$EXIT_CODE" -eq "$HEALTH_WATCHDOG_EXIT_CODE" ]; then
             echo "[entrypoint] 完整健康链路持续失败，停止容器以触发 Docker 重启。" >&2
@@ -810,4 +772,5 @@ while true; do
 done
 echo "[entrypoint] 有进程退出（exit=${EXIT_CODE}），停止容器……"
 terminate_managed_processes
+stop_nginx
 exit "$EXIT_CODE"

@@ -301,6 +301,33 @@ class QBittorrentDownloader(BaseDownloader):
             info_hash,
         )
 
+    async def transfer_speeds(self) -> tuple[int, int]:
+        return await asyncio.to_thread(self._transfer_speeds_sync)
+
+    def _transfer_speeds_sync(self) -> tuple[int, int]:
+        """全局瞬时速度来自 transfer/info（一次轻量请求，哨兵秒级轮询可承受）。"""
+        client = self._client()
+        with _translate_errors(self.config.url):
+            info = client.transfer_info()
+        return (
+            int(info.get("up_info_speed", 0) or 0),
+            int(info.get("dl_info_speed", 0) or 0),
+        )
+
+    async def set_download_limits(self, info_hashes: list[str], limit_bytes: int | None) -> None:
+        await asyncio.to_thread(self._set_download_limits_sync, info_hashes, limit_bytes)
+
+    def _set_download_limits_sync(self, info_hashes: list[str], limit_bytes: int | None) -> None:
+        """qB 的按种限速：-1 = 取消限速（与 torrents/info 的 dl_limit=-1 一致）。"""
+        if not info_hashes:
+            return
+        client = self._client()
+        with _translate_errors(self.config.url):
+            client.torrents_set_download_limit(
+                limit=limit_bytes if limit_bytes and limit_bytes > 0 else -1,
+                torrent_hashes=[h.lower() for h in info_hashes],
+            )
+
     async def get_limits(self) -> DownloaderLimits:
         return await asyncio.to_thread(self._get_limits_sync)
 

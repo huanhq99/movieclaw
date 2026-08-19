@@ -104,8 +104,20 @@ _ZERO_YIELD_BYTES = 64 * 1024**2
 _JUDGMENT_AFTER_COMPLETE = timedelta(hours=12)
 # 单种体积上限 = 预算的 1/4：单种吃掉大半预算会让汰换失去弹性
 _MAX_SIZE_BUDGET_FRACTION = 4
+# 最低准入评分：L/(S+1) 太低 = 和一群做种者抢少量需求，注定低效。
+# 首日数据：评分 < 3 的准入（入场 seeders 45~218）上传/下载比只有 0.3~0.6，
+# 占着带宽和预算拉低平均；评分 50+ 的普遍 ≥ 1。宁可空转不收垃圾
+_MIN_ADMIT_SCORE = 3.0
 # 每站每 tick 最多提交数：对站点保持克制
 _MAX_ADMIT_PER_TICK = 3
+# 同时在下的刷流任务上限（跨站点、按下载器计）：SRPT 思想——高分种近似
+# 串行地独享下载带宽，最早完成最早独享做种红利。首夜数据：平均在下 7.5 个
+# 的小时下行冲到 69 MB/s、上传塌掉 3/4；并发压低后每个任务下得更快、
+# 更早上桌、免费窗口风险也更小
+_MAX_CONCURRENT_DOWNLOADS = 3
+# JIT 预测止损的证据门槛：入池不足 30 分钟不预测（速率观测还不充分，
+# 可能刚排完队开始下载，凭均速误杀会永久跳过一个好种）
+_PREDICT_MIN_AGE = timedelta(minutes=30)
 # 提交后宽限：刚提交的任务可能还没出现在下载器列表里，不能立刻判 missing
 _MISSING_GRACE = timedelta(minutes=10)
 # 最小准入余量：余量（剩余预算 + 可汰换容量）低于此值时视为"没有能力接新种"——
@@ -192,6 +204,8 @@ def assess_candidate(
     score = row.leechers / ((row.seeders or 0) + 1)
     if row.upload_volume_factor and row.upload_volume_factor > 1.0:
         score *= row.upload_volume_factor
+    if score < _MIN_ADMIT_SCORE:
+        return False, 0.0  # 供需比太差，注定与做种大军抢食（见常量注释）
     return True, score
 
 
@@ -289,7 +303,12 @@ def downloader_congested(states: Iterable[str]) -> bool:
 
 
 def stop_loss_reason(
-    task: RatioBoostTask, progress: float, now: datetime, *, queued: bool = False
+    task: RatioBoostTask,
+    progress: float,
+    now: datetime,
+    *,
+    queued: bool = False,
+    dl_rate: float | None = None,
 ) -> str | None:
     """未完成任务的止损判定：该放弃则返回中文原因，否则 None。
 
@@ -299,6 +318,10 @@ def stop_loss_reason(
 
     - 免费窗口已过、剩余还超过 1/10：每多下一字节都是付费流量，删；
       已下到 9 成以上则放行下完（删了全白费，剩余付费量很小）；
+    - **JIT 预测止损**：窗口还没过，但按实测下载速率（``dl_rate``，
+      字节/秒）预测赶不上（含安全垫）——早停一小时就省一小时的白下带宽，
+      比等窗口过了才认账强。证据门槛：入池满 30 分钟、未在排队（排队时
+      速率失真）、速率确为观测值（None=旧适配器不提供，跳过）；
     - 48 小时仍未完成：死种/无源，或一直在队列里排不上（拥堵感知准入
       挡住了新增，但存量排队任务长期抢不到活动位时也该让出预算）——
       两种情况动作相同，原因如实区分。
@@ -311,11 +334,47 @@ def stop_loss_reason(
         and (1.0 - progress) > _ABANDON_REMAINING_FRACTION
     ):
         return f"免费窗口已过仍未下完（进度 {progress:.0%}），止损放弃避免付费下载"
+    if (
+        task.free_deadline is not None
+        and now <= task.free_deadline
+        and not queued
+        and dl_rate is not None
+        and dl_rate > 0
+        and (1.0 - progress) > _ABANDON_REMAINING_FRACTION
+        and now - task.created_at >= _PREDICT_MIN_AGE
+    ):
+        remaining_seconds = (1.0 - progress) * task.size_bytes / dl_rate
+        available = (task.free_deadline - now - _MIN_FREE_MARGIN).total_seconds()
+        if remaining_seconds > available:
+            return (
+                f"免费窗口预计赶不上（进度 {progress:.0%}，"
+                f"实测速度约 {dl_rate / 1024**2:.1f} MiB/s），提前止损避免付费下载"
+            )
     if now - task.created_at >= _STUCK_AFTER:
         if queued:
             return "排队 48 小时仍未获得下载机会（下载器活动任务已满），放弃让出预算"
         return "下载 48 小时仍未完成（死种或无可用资源），放弃让出预算"
     return None
+
+
+def _observed_dl_rate(
+    task: RatioBoostTask, downloaded_before: int, baseline_at: datetime, now: datetime
+) -> float | None:
+    """任务的实测下载速率（字节/秒），供 JIT 预测止损。
+
+    取两个口径的较大者，对任务**从宽**（预测是用来放弃的，宁可少杀）：
+    - 入池均速：累计下载量 / 入池时长——平滑但会被前期排队拉低；
+    - 本 tick 瞬时速：下载量差分 / tick 间隔——捕捉"刚开始动起来"。
+    旧适配器不提供下载量（downloaded_bytes 恒 0 且无差分）时返回 None，
+    调用方跳过预测。
+    """
+    if task.downloaded_bytes <= 0:
+        return None
+    age = (now - task.created_at).total_seconds()
+    avg = task.downloaded_bytes / age if age > 0 else 0.0
+    dt = (now - baseline_at).total_seconds()
+    instant = (task.downloaded_bytes - downloaded_before) / dt if dt > 0 else 0.0
+    return max(avg, instant)
 
 
 def turnover_seconds(task: RatioBoostTask) -> float:
@@ -595,6 +654,7 @@ async def _refresh_tasks(
             continue
         uploaded_before = task.uploaded_bytes
         downloaded_before = task.downloaded_bytes
+        baseline_at = task.last_checked_at or task.created_at
         apply_observation(
             task,
             uploaded_bytes=brief.uploaded_bytes,
@@ -613,9 +673,15 @@ async def _refresh_tasks(
         obs.dlspeed_sum += brief.dlspeed_bytes or 0
         if not task.completed:
             obs.downloading_count += 1
-        # 未完成任务的止损：免费窗口过期 / 长期卡死或排队 → 连数据删除，让出预算
+        # 未完成任务的止损：免费窗口过期 / 预测赶不上 / 长期卡死或排队
+        # → 连数据删除，让出预算。预测用的实测速率取「入池均速」与「本 tick
+        # 瞬时速」的较大者：任务可能先排队后开下，均速会低估当前能力
         reason = stop_loss_reason(
-            task, brief.progress or 0.0, now, queued=brief.state == "queued"
+            task,
+            brief.progress or 0.0,
+            now,
+            queued=brief.state == "queued",
+            dl_rate=_observed_dl_rate(task, downloaded_before, baseline_at, now),
         )
         if reason is not None:
             await _evict(pool, task, now, reason=reason)
@@ -812,6 +878,28 @@ async def _admit_candidates(
             cred.site_id,
         )
         return
+    # 下载并发帽（SRPT 思想，跨站点按下载器计）：先把手里的下完、尽早转入
+    # 做种，比摊大饼强——并发高时任务互相抢带宽，全都更晚上桌、免费窗口
+    # 风险全面上升（首夜数据见 _MAX_CONCURRENT_DOWNLOADS 注释）
+    downloading_count = (
+        await session.execute(
+            select(func.count()).select_from(RatioBoostTask).where(
+                RatioBoostTask.state == BoostTaskState.ACTIVE,
+                RatioBoostTask.completed == False,  # noqa: E712 -- SQL 表达式
+                RatioBoostTask.downloader_id == downloader.id,
+            )
+        )
+    ).scalar_one()
+    download_slots = _MAX_CONCURRENT_DOWNLOADS - downloading_count
+    if download_slots <= 0:
+        logger.debug(
+            "刷流：下载器「%s」已有 %d 个任务在下（并发帽 %d），站点 %s 本轮暂停准入",
+            downloader.name,
+            downloading_count,
+            _MAX_CONCURRENT_DOWNLOADS,
+            cred.site_id,
+        )
+        return
 
     site_id = cred.site_id
     budget = cred.boost_budget_bytes
@@ -898,9 +986,10 @@ async def _admit_candidates(
     scored.sort(key=lambda pair: (-pair[0], pair[1].size_bytes or 0))
 
     admitted = 0
+    admit_cap = min(_MAX_ADMIT_PER_TICK, download_slots)
     save_path = _boost_save_path(downloader)
     for score, row in scored:
-        if admitted >= _MAX_ADMIT_PER_TICK:
+        if admitted >= admit_cap:
             break
         size = row.size_bytes or 0
         space = budget - used

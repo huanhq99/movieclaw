@@ -90,6 +90,23 @@ class BaseDownloader(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def transfer_speeds(self) -> tuple[int, int]:
+        """读取下载器全局的瞬时速度：(上传字节/秒, 下载字节/秒)。
+
+        刷流带宽哨兵的快环信号源：上行受压时刷流下载秒级让路。含下载器里
+        **全部**任务的流量（用户自己的下载也在内）——哨兵保护的是整条链路
+        的上行，不区分流量归属。
+        """
+
+    @abc.abstractmethod
+    async def set_download_limits(self, info_hashes: list[str], limit_bytes: int | None) -> None:
+        """批量设置指定任务的下载限速（字节/秒），``None`` = 取消限速。
+
+        刷流带宽哨兵只对 movieclaw-boost 分类的任务限速让路，绝不触碰
+        下载器全局限速或用户自己的任务。不存在的 hash 静默忽略（幂等）。
+        """
+
+    @abc.abstractmethod
     async def test_connection(self) -> DownloaderInfo:
         """验证连通性与凭证，返回下载器版本信息。"""
 

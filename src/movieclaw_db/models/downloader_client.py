@@ -73,3 +73,11 @@ class DownloaderClient(TimestampMixin, table=True):
     last_checked_at: datetime | None = Field(default=None, description="最近一次测试时间")
     # 最近一次连接成功时获取的下载器版本号（如 v5.0.2），供管理页展示
     version: str | None = Field(default=None, description="下载器版本号")
+
+    # 刷流带宽哨兵学到的安全下载包络（字节/秒）：AIMD 闭环的持久化状态。
+    # 上行受压时乘性回退、健康时加性恢复，收敛到"该环境下不伤上传的刷流
+    # 下载总速度"。NULL = 尚未观测到拥塞（不限速）——对称大带宽环境会
+    # 一直保持 NULL，零配置零行为变化。机制见 boost_bandwidth 模块注释
+    boost_dl_envelope_bytes: int | None = Field(
+        default=None, description="刷流安全下载包络（字节/秒）；NULL=不限"
+    )

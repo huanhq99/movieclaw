@@ -306,6 +306,36 @@ class TransmissionDownloader(BaseDownloader):
             info_hash,
         )
 
+    async def transfer_speeds(self) -> tuple[int, int]:
+        return await asyncio.to_thread(self._transfer_speeds_sync)
+
+    def _transfer_speeds_sync(self) -> tuple[int, int]:
+        """全局瞬时速度来自 session-stats（uploadSpeed/downloadSpeed，字节/秒）。"""
+        client = self._client()
+        with _translate_errors(self.config.url):
+            stats = client.session_stats()
+        f = stats.fields
+        return int(f.get("uploadSpeed", 0) or 0), int(f.get("downloadSpeed", 0) or 0)
+
+    async def set_download_limits(self, info_hashes: list[str], limit_bytes: int | None) -> None:
+        await asyncio.to_thread(self._set_download_limits_sync, info_hashes, limit_bytes)
+
+    def _set_download_limits_sync(self, info_hashes: list[str], limit_bytes: int | None) -> None:
+        """Transmission 的按种限速：downloadLimit 是 kB/s + 独立开关，
+        None=关开关（取消限速）。不存在的 hash 由守护进程静默忽略。"""
+        if not info_hashes:
+            return
+        ids = [h.lower() for h in info_hashes]
+        with _translate_errors(self.config.url):
+            if limit_bytes is None or limit_bytes <= 0:
+                self._client().change_torrent(ids, download_limited=False)
+            else:
+                self._client().change_torrent(
+                    ids,
+                    download_limited=True,
+                    download_limit=max(1, round(limit_bytes / 1000)),
+                )
+
     async def get_limits(self) -> DownloaderLimits:
         return await asyncio.to_thread(self._get_limits_sync)
 

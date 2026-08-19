@@ -162,6 +162,13 @@ def build_lifespan(settings: Settings):
             # 启动后的更新首查（延迟数分钟）：容器重启后尽快感知新版，
             # 不用等下一个小时周期；非 Docker 部署内部自动跳过
             app_update.start_startup_check()
+            # 刷流带宽哨兵：有刷流任务在下载时秒级保护上行（与刷流引擎
+            # 同属调度器开关管辖——引擎不跑就没有在下任务，哨兵空转无意义）
+            from movieclaw_api.services.boost_bandwidth import (
+                init_boost_bandwidth_sentinel,
+            )
+
+            init_boost_bandwidth_sentinel()
         else:
             logger.info("定时任务调度器已按配置关闭（SCHEDULER_ENABLED=false）")
         # 媒体库实时监控（L4）：库根路径文件事件 → 去抖 → 增量扫描；
@@ -236,7 +243,11 @@ def build_lifespan(settings: Settings):
             await close_enrich_backfill()
             if settings.scheduler_enabled:
                 from movieclaw_api.services.app_update import close_startup_check
+                from movieclaw_api.services.boost_bandwidth import (
+                    close_boost_bandwidth_sentinel,
+                )
 
+                await close_boost_bandwidth_sentinel()
                 await close_startup_check()
                 await get_scheduler().shutdown()
             # 关闭所有站点共享客户端的连接池，再释放数据库

@@ -158,6 +158,12 @@ class TestAssessCandidate:
         _, doubled = _assess(_row(upload_volume_factor=2.0))
         assert doubled == base * 2
 
+    def test_rejects_low_score(self) -> None:
+        """最低分门槛：供需比太差（评分 < 3）的候选注定与做种大军抢食，
+        宁可空转不收——首日数据里这类准入的上传/下载比只有 0.3~0.6。"""
+        assert not _assess(_row(seeders=30, leechers=30))[0]  # 30/31 ≈ 0.97
+        assert _assess(_row(seeders=9, leechers=30))[0]  # 恰好 3.0，放行
+
 
 # ---------------------------------------------------------------------------
 # 免费窗口
@@ -515,6 +521,49 @@ class TestStopLoss:
         task = _task(completed=False, created_at=_NOW - timedelta(hours=49))
         reason = stop_loss_reason(task, progress=0.0, now=_NOW, queued=True)
         assert reason is not None and "排队" in reason and "死种" not in reason
+
+    def _jit_task(self, **kw):
+        """JIT 预测的默认场景：入池 2 小时、窗口还剩 3 小时、10 GiB 下了一半。"""
+        defaults = dict(
+            completed=False,
+            size_bytes=10 * _GIB,
+            created_at=_NOW - timedelta(hours=2),
+            free_deadline=_NOW + timedelta(hours=3),
+        )
+        defaults.update(kw)
+        return _task(**defaults)
+
+    def test_predicted_miss_abandons_early(self) -> None:
+        """按实测速率预测赶不上免费窗口：不等窗口过完，提前止损省带宽。
+        剩 5 GiB、实测 100 KiB/s → 需 14+ 小时，可用只有 1 小时（含安全垫）。"""
+        reason = stop_loss_reason(self._jit_task(), progress=0.5, now=_NOW, dl_rate=100 * 1024)
+        assert reason is not None and "预计赶不上" in reason
+
+    def test_predicted_ok_keeps_downloading(self) -> None:
+        """实测 10 MiB/s → 剩 5 GiB 只要 8.5 分钟，窗口充裕，不动。"""
+        rate = 10 * 1024 * 1024
+        assert stop_loss_reason(self._jit_task(), progress=0.5, now=_NOW, dl_rate=rate) is None
+
+    def test_prediction_needs_evidence_age(self) -> None:
+        """入池不足 30 分钟不预测：可能刚排完队开始下，均速失真，误杀会
+        永久跳过一个好种。"""
+        task = self._jit_task(created_at=_NOW - timedelta(minutes=10))
+        assert stop_loss_reason(task, progress=0.05, now=_NOW, dl_rate=100 * 1024) is None
+
+    def test_prediction_skips_queued_and_unknown_rate(self) -> None:
+        """排队中速率失真不预测；旧适配器不提供下载量（rate=None）也不预测。"""
+        task = self._jit_task()
+        assert (
+            stop_loss_reason(task, progress=0.5, now=_NOW, queued=True, dl_rate=100 * 1024)
+            is None
+        )
+        assert stop_loss_reason(task, progress=0.5, now=_NOW, dl_rate=None) is None
+
+    def test_prediction_spares_nearly_done(self) -> None:
+        """已下到 9 成以上：与过期止损同一豁免——删了全白费。"""
+        assert (
+            stop_loss_reason(self._jit_task(), progress=0.95, now=_NOW, dl_rate=1024) is None
+        )
 
 
 class TestDownloaderCongested:

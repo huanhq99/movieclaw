@@ -472,7 +472,7 @@ function ExpandablePlot({ text }: { text: string }) {
     <div className="max-w-3xl">
       <p
         ref={paragraphRef}
-        className={`text-on-image text-body-lg leading-7 text-white/78 ${
+        className={`selectable text-on-image text-body-lg leading-7 text-white/78 ${
           expanded ? "" : "line-clamp-4"
         }`}
       >

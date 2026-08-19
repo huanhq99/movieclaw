@@ -598,7 +598,9 @@ export function SystemLogsSection() {
 function LogRow({ entry, query }: { entry: LogEntry; query: string }) {
   const style = LEVEL_STYLE[entry.level];
   return (
-    <div className={`flex items-start gap-2.5 px-4 py-[3px] transition-colors hover:bg-white/[0.04] ${style.row}`}>
+    <div
+      className={`selectable flex items-start gap-2.5 px-4 py-[3px] transition-colors hover:bg-white/[0.04] ${style.row}`}
+    >
       <span className="tnum shrink-0 select-none text-[var(--text-faint)]">{entry.time || "​"}</span>
       <span
         className={`mt-[2px] w-[46px] shrink-0 select-none rounded px-1 py-px text-center text-micro font-semibold tracking-wide ${style.badge}`}

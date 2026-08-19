@@ -168,7 +168,7 @@ export function SubtitlePreviewDialog({
                   <span>{formatTimestamp(cue.start_ms)}</span>
                   <span className="text-white/30">→ {formatTimestamp(cue.end_ms)}</span>
                 </span>
-                <span className="whitespace-pre-wrap break-words text-ui leading-6 text-white/88">
+                <span className="selectable whitespace-pre-wrap break-words text-ui leading-6 text-white/88">
                   {cue.text}
                 </span>
               </li>

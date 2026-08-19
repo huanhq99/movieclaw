@@ -326,7 +326,7 @@ function UserBubble({ text, onEdit }: { text: string; onEdit?: () => void }) {
           onClick 挂在气泡而非整行上：右对齐留出的空白不该也是热区。 */}
       <div
         onClick={toggle}
-        className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-[var(--glass-fill-active)] px-4 py-3 text-body leading-6 text-[var(--text)]"
+        className="selectable max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-[var(--glass-fill-active)] px-4 py-3 text-body leading-6 text-[var(--text)]"
       >
         {text}
       </div>
@@ -506,7 +506,7 @@ const ProcessBlock = memo(function ProcessBlock({ segment, active }: { segment: 
               // token（点号不是换行机会点），不断词会把整个消息列撑出横向溢出
               <p
                 key={index}
-                className="whitespace-pre-wrap break-words text-sub leading-5 text-[var(--text-faint)]"
+                className="selectable whitespace-pre-wrap break-words text-sub leading-5 text-[var(--text-faint)]"
               >
                 {item.text}
               </p>
@@ -613,7 +613,7 @@ const ToolCallCard = memo(function ToolCallCard({ tool }: { tool: AgentTurnToolC
           ) : (
             <div
               // 行高用相对值：字号随语义 token 在移动端换档（11→13px），固定 16px 行高会挤死多行日志
-              className={`scroll-thin mt-1 max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono text-caption leading-[1.45] ${
+              className={`selectable scroll-thin mt-1 max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono text-caption leading-[1.45] ${
                 tool.isError ? "text-[#ff6b6b]" : "text-[var(--text-muted)]"
               }`}
             >
@@ -654,7 +654,7 @@ const CompactionCard = memo(function CompactionCard({
       </button>
       {open && (
         <div className="mt-1.5 space-y-1.5 border-l-2 border-white/[0.08] pl-3">
-          <p className="whitespace-pre-wrap break-words text-sub leading-5 text-[var(--text-faint)]">
+          <p className="selectable whitespace-pre-wrap break-words text-sub leading-5 text-[var(--text-faint)]">
             {segment.summary}
           </p>
           <p className="text-caption text-[var(--text-faint)]">

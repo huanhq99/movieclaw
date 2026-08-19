@@ -56,7 +56,8 @@ import {
  * 片源规格与文件区。
  *
  * 页面纵向结构：
- *   1. 局部 Hero —— 剧照只铺顶部有限高度，cover 等比裁切，不再用全站背景拉满页面；
+ *   1. 沉浸背景 —— 进入本页把全站背景临时换成该片剧照（setOverrideBackdrop），
+ *      页面本身不画 Hero 图层：大图直出、零边界，侧栏与外壳留白一起透出。
  *      顶栏首屏只有一颗返回键浮在剧照上，没有横幅剧照时退回海报作氛围图。
  *   2. 氛围留白 + 渐变内容层 —— 渐变从标题上方开始压暗，并在基础信息之后落成纯黑。
  *   3. 头部信息区 —— 标题 / 核心元信息 / 地区、语言与类型 / 上映日期 / 订阅操作，
@@ -131,6 +132,22 @@ export function MediaDetailView({
   const item = detail?.item ?? listItem;
   usePageTitle(item?.title);
 
+  // 沉浸背景：进入本页把全站背景临时换成该片剧照（侧栏、外壳留白一起透出，
+  // 不再只铺详情卡片的局部），离开即恢复用户配置的背景——与媒体库条目详情页
+  // 同一条链路（见 lib/backdrop.tsx 的 setOverrideBackdrop）。没有横幅剧照时
+  // 退回海报，覆盖层自己会铺满作氛围色。
+  //
+  // 豆瓣来源不换背景：豆瓣只有小尺寸海报、没有高清横幅剧照，铺成全屏背景是
+  // 一片糊图，比用户自己配置的背景差得多。宁可保持原背景，也不要为了沉浸降质。
+  const { setOverrideBackdrop } = useBackdrop();
+  const immersiveUrl =
+    source === "douban" ? "" : item?.backdropUrl || item?.posterUrl || "";
+  useEffect(() => {
+    if (!immersiveUrl) return;
+    setOverrideBackdrop(immersiveUrl);
+    return () => setOverrideBackdrop(null);
+  }, [immersiveUrl, setOverrideBackdrop]);
+
   // 豆瓣外链的移动端 App 直跳：无悬停设备把「豆瓣」外链换成官方分发地址，
   // 装了豆瓣 App 直接拉起进词条页（桌面/未命中时为 null，回落网页地址）
   const doubanAppHref = useDoubanAppHref(source === "douban" ? id : null);
@@ -150,7 +167,6 @@ export function MediaDetailView({
   }
 
   const info = detail?.info;
-  const itemBackdropUrl = item.backdropUrl || item.posterUrl;
   const collection = detail?.collection;
   const related = detail?.related ?? [];
   const libraryLinks = detail?.libraryLinks ?? [];
@@ -194,33 +210,19 @@ export function MediaDetailView({
     // max-md:rounded-none：圆角只在桌面成立（外壳 p-3.5 的留白托着卡片）；
     // 窄屏通栏满屏，圆角会直接压在屏幕边上，把吸顶顶栏裁成一块贴在屏幕顶上的
     // 圆角色块——与 library-item-detail-view 同一处理。
-    <div className="scroll-thin scroll-safe relative isolate h-full overflow-y-auto rounded-2xl bg-black max-md:rounded-none">
-      {/* 背景只属于顶部 Hero：有限高度、随页面滚走；cover 始终等比例缩放，
-          只裁切超出的边缘，不改变图片宽高比。图片自身先在较长区间内淡出到
-          完全透明，真正的容器底边因此只剩下同色黑底，不会形成一条切边。 */}
-      {itemBackdropUrl && (
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[calc(30vh+360px)] min-h-[540px] bg-cover bg-center bg-no-repeat max-md:h-[calc(22vh+340px)] max-md:min-h-[460px]"
-          style={{
-            backgroundImage: `url(${JSON.stringify(itemBackdropUrl)})`,
-            WebkitMaskImage:
-              "linear-gradient(to bottom,#000 0%,#000 50%,rgba(0,0,0,.92) 60%,rgba(0,0,0,.65) 72%,rgba(0,0,0,.3) 84%,rgba(0,0,0,.08) 93%,transparent 98%,transparent 100%)",
-            maskImage:
-              "linear-gradient(to bottom,#000 0%,#000 50%,rgba(0,0,0,.92) 60%,rgba(0,0,0,.65) 72%,rgba(0,0,0,.3) 84%,rgba(0,0,0,.08) 93%,transparent 98%,transparent 100%)",
-          }}
-        />
-      )}
-
-      {/* 顶栏首屏只有返回键浮在局部剧照上。 */}
+    <div className="detail-ambient scroll-thin scroll-safe relative isolate h-full overflow-y-auto rounded-2xl max-md:rounded-none">
+      {/* 没有任何 Hero 图层：全站背景此刻就是本片剧照（沉浸覆盖 + 本页豁免
+          全局蒙版，见 app-shell 的 isHome），大图直出、零边界；.detail-ambient
+          在滚动容器上铺「透明 → 纯黑」的渐变板托住下方内容（见 globals.css）。
+          顶栏首屏只有一颗返回键浮在剧照上。 */}
       <PageNav title={item.title} fallback={navFallback} />
 
       {/* 氛围留白：这一段什么都不放，让剧照完整呼吸。 */}
       <div className="h-[30vh] min-h-[180px] max-md:h-[22vh] max-md:min-h-[120px]" />
 
-      {/* 内容遮罩与图片透明衰减交叠：用更多低跨度色阶缓慢落黑，避免在某个
-          固定高度突然结束渐变；基础信息附近已经接近纯黑，下面保持全黑。 */}
-      <div className="relative z-10 -mt-28 bg-[linear-gradient(180deg,rgba(0,0,0,0)_0,rgba(0,0,0,0.16)_42px,rgba(0,0,0,0.34)_78px,rgba(0,0,0,0.55)_120px,rgba(0,0,0,0.73)_165px,rgba(0,0,0,0.87)_210px,rgba(0,0,0,0.96)_255px,#000_315px,#000_100%)] pb-12 pt-28">
+      {/* 内容层：-mt-28/pt-28 与 .detail-ambient 的渐变起点对齐——渐变从标题
+          上方开始压暗，基础信息附近已接近纯黑，下面保持全黑。 */}
+      <div className="relative z-10 -mt-28 pb-12 pt-28">
       {/* —— 3. 头部信息区 —— */}
       <div className="relative z-10 px-12 pt-6 max-md:px-4 max-md:pt-3">
         <div className="min-w-0 max-w-5xl pb-1">

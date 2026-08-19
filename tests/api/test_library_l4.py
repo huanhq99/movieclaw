@@ -425,6 +425,10 @@ async def test_watcher_triggers_incremental_scan(db, tmp_path, monkeypatch) -> N
     watcher = watch_mod.LibraryWatcher()
     await watcher.start()
     try:
+        # 建 watch 已放后台（不阻塞应用启动），等它完成再造文件，
+        # 否则事件可能发生在监听建立之前
+        assert watcher._startup is not None
+        await watcher._startup
         folder = root / "阿凡达 (2009)"
         folder.mkdir()
         (folder / "Avatar.2009.1080p.mkv").write_bytes(b"movie")

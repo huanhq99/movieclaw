@@ -166,6 +166,8 @@ def build_lifespan(settings: Settings):
             logger.info("定时任务调度器已按配置关闭（SCHEDULER_ENABLED=false）")
         # 媒体库实时监控（L4）：库根路径文件事件 → 去抖 → 增量扫描；
         # watchdog 缺失/根路径未就绪时优雅降级为仅对账任务兜底。
+        # 建 watch 在监听器内部后台进行，这里立即返回——网络挂载上的
+        # 递归建 watch 可达分钟级，曾把 startup 拖到超时（issue #162）。
         from movieclaw_api.services.library.watch import init_library_watcher
 
         await init_library_watcher()

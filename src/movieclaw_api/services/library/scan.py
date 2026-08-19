@@ -41,11 +41,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
+from itertools import islice
 from pathlib import Path
 from uuid import uuid4
 
@@ -64,7 +66,6 @@ from movieclaw_api.services.library.layout import (
     STRM_EXT,
     entry_dirs,
     explicit_unit,
-    is_disc_dir,
     season_from_dir,
     trailing_index_episode,
 )
@@ -575,6 +576,7 @@ async def scan_library(
     *,
     backfill_existing_specs: bool = True,
     reprobe_paths: set[str] | None = None,
+    scope_paths: set[str] | None = None,
     reconcile_root_change: bool = False,
     previous_root_paths: list[str] | None = None,
     reconcile_new_root_paths: list[str] | None = None,
@@ -594,6 +596,13 @@ async def scan_library(
     (size, mtime)，确认变化才重探——视频原地替换（洗版/重灌同路径）后
     介质规格与内封字幕轨不再永久陈旧。手动扫描（backfill_existing_specs
     开启）则对全部在位行做该比对，无需点名。
+
+    ``scope_paths``：watch 事件限定的扫描范围（根下第一级条目的绝对路径
+    集合，仅监听触发的扫描传入）。范围内的子树照常遍历入账、范围内的
+    台账行照常标 missing，范围外的行完全不动；自动清理丢失记录在范围
+    扫描中跳过（清理要求「整根遍历过且可信」，交给对账与手动扫描）。
+    范围解析存疑时自动退回整库遍历（见 _resolve_scope）。只应与
+    ``backfill_existing_specs=False`` 搭配、不与 reconcile 参数同用。
 
     ``reconcile_root_change`` 仅由媒体库编辑根路径后的后台扫描传入，且必须
     同时给出编辑前的 ``previous_root_paths``。它以旧/新根下相同的相对路径
@@ -663,6 +672,7 @@ async def scan_library(
             state,
             backfill_existing_specs=backfill_existing_specs,
             reprobe_paths=reprobe_paths or set(),
+            scope_paths=scope_paths,
             reconcile_root_change=reconcile_root_change,
             previous_root_paths=previous_root_paths or [],
             reconcile_new_root_paths=reconcile_new_root_paths or [],
@@ -745,6 +755,33 @@ async def _run_scan_job(
     return {"message": message, **payload}
 
 
+async def _resolve_scope(
+    library: Library, scope_paths: set[str] | None
+) -> dict[str, set[str]] | None:
+    """把事件限定的绝对路径解析成「根路径 → 第一级条目名」；解析不了退回整库。
+
+    范围路径由 watch 按建 watch 时的根推导（根下第一级条目，见
+    watch._scope_for），扫描时根配置可能已经变化。只有每一条都仍是
+    **现存目录**、且正好落在当前某个根的第一级时才启用范围扫描；任何
+    存疑——根已换、条目已被删除/改名、根级散文件的事件——都返回 None
+    走整库遍历。整库是今天的既有成本，多扫永远安全；范围判错漏扫则会
+    漏标 missing、漏入账。
+    """
+    if not scope_paths:
+        return None
+    roots = {str(Path(r)) for r in library.root_paths}
+    by_root: dict[str, set[str]] = {}
+    for raw in sorted(scope_paths):
+        target = str(Path(raw))
+        parent, name = os.path.split(target)
+        if parent not in roots or not name:
+            return None
+        by_root.setdefault(parent, set()).add(name)
+    targets = sorted(scope_paths)
+    all_dirs = await asyncio.to_thread(lambda: all(os.path.isdir(t) for t in targets))
+    return by_root if all_dirs else None
+
+
 async def _scan(
     library_id: int,
     summary: ScanSummary,
@@ -752,6 +789,7 @@ async def _scan(
     *,
     backfill_existing_specs: bool,
     reprobe_paths: set[str],
+    scope_paths: set[str] | None,
     reconcile_root_change: bool,
     previous_root_paths: list[str],
     reconcile_new_root_paths: list[str],
@@ -794,7 +832,9 @@ async def _scan(
             known.update({row.file_path: row for row in await repo.list_by_library(library_id)})
             resolve_cache.clear()
 
-        # 先盘点全部待处理文件（纯目录遍历、很快）：总数定下来，进度才有分母
+        # 先盘点全部待处理文件：总数定下来，进度才有分母。遍历的每一次
+        # readdir 都是阻塞磁盘 IO（网络挂载上还是网络往返），分块放线程池
+        # 执行、事件循环只在块间收结果——大库/慢盘遍历不再冻住全部请求
         seen_paths: set[str] = set()
         scanned_roots: list[str] = []
         # 遍历中列不动的目录（权限/IO/网络挂载抖动）：本轮的"没遍历到"因此
@@ -803,25 +843,43 @@ async def _scan(
         pending: list[tuple[Path, Path, bool]] = []  # (根, 文件, 是否原盘)
         # 目录 → 文件名列表：遍历时顺手截获，外挂字幕发现零额外目录 IO
         dir_files: dict[str, list[str]] = {}
+        # 范围扫描（watch 事件限定）：根路径 → 允许下钻的第一级条目名；
+        # None = 整库遍历。任何存疑（根已换、条目已消失、根级文件事件）都
+        # 退回整库——宁可多扫，不能漏扫（漏扫会漏标 missing、漏入账）
+        scope_names_by_root = await _resolve_scope(library, scope_paths)
         for root in library.root_paths:
             if bridge is not None:
                 await bridge.raise_if_cancelled()
             root_path = Path(root)
-            if not root_path.exists():
+            only_top: set[str] | None = None
+            if scope_names_by_root is not None:
+                only_top = scope_names_by_root.get(str(root_path))
+                if not only_top:
+                    continue  # 本根不在事件范围内：不遍历，也不参与丢失标记
+            if not await asyncio.to_thread(root_path.exists):
                 summary.errors.append(f"根路径不存在，已跳过：{root}")
                 continue
             scanned_roots.append(str(root_path))
-            for file, is_disc in _walk_videos(root_path, unreadable_dirs, dir_files):
-                # 根路径互相嵌套时同一个文件会被遍历两次，去重后才是"每个文件
-                # 处理一次"：重复处理不只是白跑一趟识别链，第二趟还会拿着过期的
-                # 台账快照去插入已存在的路径
-                if str(file) in seen_paths:
-                    continue
-                seen_paths.add(str(file))
-                pending.append((root_path, file, is_disc))
+            walker = (
+                _walk_videos(root_path, unreadable_dirs, dir_files)
+                if only_top is None
+                else _walk_videos(root_path, unreadable_dirs, dir_files, only_top=only_top)
+            )
+            while True:
+                batch = await asyncio.to_thread(_take_chunk, walker)
+                for file, is_disc in batch:
+                    # 根路径互相嵌套时同一个文件会被遍历两次，去重后才是"每个
+                    # 文件处理一次"：重复处理不只是白跑一趟识别链，第二趟还会
+                    # 拿着过期的台账快照去插入已存在的路径
+                    if str(file) in seen_paths:
+                        continue
+                    seen_paths.add(str(file))
+                    pending.append((root_path, file, is_disc))
                 state.processed = len(pending)
                 if bridge is not None:
                     await bridge.checkpoint(state, summary, before_write=session.commit)
+                if len(batch) < _WALK_CHUNK_FILES:
+                    break
 
         # 根路径编辑后的同实体收敛：用户可能把 ``/media/movies`` 改成指向
         # 同一目录的挂载别名/软链接。此时磁盘对象没有变，台账里的旧路径却已
@@ -951,7 +1009,7 @@ async def _scan(
             # 暂缓入账、稍后补扫——库不假设目录用途，根路径完全可能同时是
             # 下载目录。mtime 在未来超出一个窗口视为时钟异常，照常入账
             try:
-                age = now_ts - file.stat().st_mtime
+                age = now_ts - (await asyncio.to_thread(file.stat)).st_mtime
             except OSError:
                 age = NEW_FILE_QUIET_SECONDS  # 瞬时消失/不可读：交给后续流程处理
             if -NEW_FILE_QUIET_SECONDS <= age < NEW_FILE_QUIET_SECONDS:
@@ -1018,6 +1076,17 @@ async def _scan(
         # upsert_by_path 会自动清除标记。判定须读行上的当前路径而非快照
         # 的旧 key：改名归并（_try_relink）会把行迁到本轮刚遍历过的新路径
         prefixes = [f"{r.rstrip('/')}/" for r in scanned_roots]
+        # 范围扫描只对范围内的行做丢失判定：范围外的行"本轮没遍历到"是
+        # 设计使然（根本没去看），不是丢失
+        scope_prefixes: list[str] | None = None
+        if scope_names_by_root is not None:
+            walked_roots = set(scanned_roots)
+            scope_prefixes = [
+                str(Path(scoped_root) / name)
+                for scoped_root, names in scope_names_by_root.items()
+                if scoped_root in walked_roots
+                for name in names
+            ]
         # 原盘内部的行（存量嵌套/手动放入）：_walk_videos 不进原盘目录，
         # seen 恒不含它们，按 seen 判会误标缺失且永不自愈——这类行改按
         # 物理存在性对账（docs/design/disc-version-layout.md §4）。正常库
@@ -1034,6 +1103,10 @@ async def _scan(
                 continue
             if not any(path_str.startswith(prefix) for prefix in prefixes):
                 continue
+            if scope_prefixes is not None and not any(
+                path_str == sp or path_str.startswith(sp + "/") for sp in scope_prefixes
+            ):
+                continue
             assert row.id is not None
             if any(path_str.startswith(dp) for dp in disc_prefixes):
                 exists = Path(path_str).exists()
@@ -1049,18 +1122,21 @@ async def _scan(
             summary.marked_missing += 1
 
         # 收尾清理：开了「自动清理丢失记录」的库，把已确认丢失的行清出台账，
-        # 让 file_count 与磁盘对齐（默认关；不可信的一轮整轮让路）
-        await _auto_clear_missing(
-            repo,
-            library,
-            summary,
-            known=list(known.values()),
-            scanned_roots=scanned_roots,
-            # 本轮真的遍历出文件的根：空根是"挂载掉了但挂载点还在"的典型
-            # 症状，自动清理不能把它当"用户把片子删光了"（见 _auto_clear_missing）
-            roots_with_files={str(root_path) for root_path, _, _ in pending},
-            unreadable_dirs=unreadable_dirs,
-        )
+        # 让 file_count 与磁盘对齐（默认关；不可信的一轮整轮让路）。
+        # 范围扫描整轮跳过：清理要求「整根遍历过且可信」，范围遍历给不出
+        # 这个保证，确认清理交给 6 小时对账与手动扫描
+        if scope_names_by_root is None:
+            await _auto_clear_missing(
+                repo,
+                library,
+                summary,
+                known=list(known.values()),
+                scanned_roots=scanned_roots,
+                # 本轮真的遍历出文件的根：空根是"挂载掉了但挂载点还在"的典型
+                # 症状，自动清理不能把它当"用户把片子删光了"（见 _auto_clear_missing）
+                roots_with_files={str(root_path) for root_path, _, _ in pending},
+                unreadable_dirs=unreadable_dirs,
+            )
         await _auto_clear_removed_root_ledger(
             repo,
             library,
@@ -1678,12 +1754,32 @@ def _disc_total_size(disc_dir: Path) -> int:
     return total
 
 
+# 原盘结构的标志目录名（与 layout.is_disc_dir 同一判据）：遍历时直接看
+# 子目录清单里有没有它们，免去对每个目录再补两次探测 stat
+_DISC_MARKER_DIRS = ("BDMV", "VIDEO_TS")
+
+# 遍历分块大小：每块在线程池里读这么多文件再回事件循环收一次结果/检查点
+_WALK_CHUNK_FILES = 500
+
+
+def _take_chunk(walker, size: int = _WALK_CHUNK_FILES) -> list:
+    """（线程池）从遍历生成器取一块结果——阻塞的磁盘 IO 全部发生在这里。"""
+    return list(islice(walker, size))
+
+
 def _walk_videos(
     root: Path,
     unreadable: list[str] | None = None,
     dir_files: dict[str, list[str]] | None = None,
+    only_top: set[str] | None = None,
 ):
     """深度遍历，产出 (路径, 是否原盘目录)。
+
+    基于 ``os.scandir``：目录/文件判定直接用 readdir 带回的 d_type，不再对
+    每个条目单独 stat（网络挂载上每次 stat 都是一轮往返，本地大库也省一半
+    系统调用）；原盘判定同样改用子目录清单推断（BDMV/VIDEO_TS 是否在列），
+    不再对每个目录额外探测两次。根目录自身不做原盘判定（沿用历史行为：
+    根是库不是条目）。
 
     原盘目录（BDMV/VIDEO_TS 结构）整体作为**一个条目**产出、不再下钻——
     盘内的几十个流文件不是独立影片。普通目录剪掉忽略/隐藏目录后继续下钻。
@@ -1696,27 +1792,47 @@ def _walk_videos(
     ``dir_files``：调用方传入的目录清单收集器（目录路径 → 文件名列表）。
     外挂字幕发现（jellyfin-subtitle.md §2.1）靠它做零额外 IO 的前缀匹配
     ——目录本轮已经列过，不再为字幕单独列第二遍。
+
+    ``only_top``：范围扫描（watch 事件限定，见 scan_library 的 scope_paths）
+    传入的「根下第一级条目名」集合——只下钻/产出命中的第一级条目，深层
+    不再限制。根目录仍完整列一次（本就只有一次 scandir 的成本），因此
+    ``dir_files`` 里根层文件清单完整，外挂字幕匹配不受范围影响。
     """
-    stack = [root]
+    # 栈元素 (目录路径, 是否做原盘判定, 第一级名字限制)：根不做原盘判定
+    # 且带范围限制；下钻的子目录都要判原盘、不再限制
+    stack: list[tuple[str, bool, set[str] | None]] = [(str(root), False, only_top)]
     while stack:
-        current = stack.pop()
+        current, check_disc, restrict = stack.pop()
         try:
-            entries = sorted(current.iterdir())
+            with os.scandir(current) as scandir_it:
+                entries = sorted(scandir_it, key=lambda e: e.name)
         except OSError:
             if unreadable is not None:
-                unreadable.append(str(current))
+                unreadable.append(current)
+            continue
+        subdirs: list[os.DirEntry] = []
+        files: list[os.DirEntry] = []
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False  # 判定不了的按文件走扩展名过滤（同旧行为）
+            (subdirs if is_dir else files).append(entry)
+        if check_disc and any(e.name in _DISC_MARKER_DIRS for e in subdirs):
+            yield Path(current), True
             continue
         if dir_files is not None:
-            dir_files[str(current)] = [e.name for e in entries if not e.is_dir()]
-        for entry in entries:
+            dir_files[current] = [e.name for e in files]
+        for entry in subdirs:
             name = entry.name
-            if entry.is_dir():
-                if name.startswith(".") or name.lower() in _IGNORE_DIRS:
-                    continue
-                if is_disc_dir(entry):
-                    yield entry, True
-                    continue
-                stack.append(entry)
+            if restrict is not None and name not in restrict:
+                continue
+            if name.startswith(".") or name.lower() in _IGNORE_DIRS:
+                continue
+            stack.append((entry.path, True, None))
+        for entry in files:
+            name = entry.name
+            if restrict is not None and name not in restrict:
                 continue
             lower = name.lower()
             suffix = Path(lower).suffix
@@ -1728,9 +1844,9 @@ def _walk_videos(
             # 目录级忽略挡不住，靠文件名惯例挡住——不入库就不会错挂
             marker = extras_marker(name)
             if marker is not None:
-                logger.debug("跳过花絮/预告类文件（命中「%s」）：%s", marker, entry)
+                logger.debug("跳过花絮/预告类文件（命中「%s」）：%s", marker, entry.path)
                 continue
-            yield entry, False
+            yield Path(entry.path), False
 
 
 async def _relink_legacy_root_paths(

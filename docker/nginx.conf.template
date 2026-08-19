@@ -1,0 +1,144 @@
+# =============================================================================
+# movieclaw 容器内的统一前门（nginx）。entrypoint 启动时把 __WEB_PORT__ /
+# __ASSETS_DIR__ 替换成实际值后渲染到 /run/movieclaw/nginx.conf 再拉起。
+#
+# 为什么要有这一层（2026-08 NAS 实测）：此前对外端口由 Next 独占，播放器
+# 取流/整文件下载的每个字节都要 Node 反代再转给 uvicorn——每 GB 多烧约
+# 10 个 CPU 秒（是直连的 5 倍），并发下载时一个核被反代吃光。nginx 转发
+# 大文件的开销约为 Node 的 1/15，且 Jellyfin 命名空间与 /api/v1 在这里直达
+# 后端，Node 只负责页面与静态资源。
+#
+# 路由规则必须与 apps/web/next.config.ts 的 rewrites 保持一致（那里仍然保留
+# 同样的规则：裸机开发不经 nginx，Next 直接反代）：
+#   - /api/v1/*                       → 后端
+#   - Jellyfin 命名空间（大小写不敏感）  → 后端
+#   - /Sessions 只放行根路径与 Capabilities/Playing 子树：控制台自己有
+#     /sessions/[id] 页面，整段通配会把页面劫持到后端
+#   - /Library 只放行真 Jellyfin 的字面子路径：控制台有 /library/[id] 页面
+#   - 其余                            → Next
+#
+# 启动/重启窗口：上游连接不上（502/504）时，页面请求回「正在启动」占位页
+# （200 + X-Movieclaw-Starting 头，页面脚本据此轮询自动进入应用），
+# /api/* 一律 503 业务信封——Docker healthcheck 与设置页的重启轮询都按未就绪
+# 处理，不会被占位页误判成健康。只拦 nginx 自己产生的错误
+# （proxy_intercept_errors 关闭），上游真实返回的 5xx 原样透传。
+# =============================================================================
+pid /run/movieclaw/nginx.pid;
+worker_processes 2;
+# 容器默认 nofile 软限制常是 1024，低于下面的 worker_connections；root 可自行抬高
+worker_rlimit_nofile 8192;
+error_log /dev/stderr warn;
+
+events {
+    worker_connections 4096;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    # uvicorn / 业务访问日志已经记录请求，这里不再重复一份
+    access_log off;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 75s;
+    # 上传（种子/字幕/背景图）走 /api/v1，大小由后端自己约束；反代层不设上限、
+    # 不落临时文件
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    # 视频流/整文件下载/SSE 一律不缓冲：缓冲意味着 nginx 会把几十 GB 的响应
+    # 尽快从后端读完写进临时文件——那正是刚修掉的「读放大」换了个地方复发。
+    # 关掉后 nginx 只按客户端实际消费速度从 uvicorn 取数据，背压直达后端。
+    proxy_buffering off;
+    # 不缓冲时 nginx 按 proxy_buffer_size 的粒度同步读上游；默认 4–8 KB 会让
+    # 每 GB 多出十几万次系统调用（NAS 实测 2.9 CPU 秒/GB），64 KB 降到 0.7 秒/GB，
+    # 再大没有收益。proxy_buffers/busy 只是为了通过 nginx 的配置一致性校验
+    proxy_buffer_size 64k;
+    proxy_buffers 4 64k;
+    proxy_busy_buffers_size 128k;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    # 外层若还有一层 HTTPS 反代（Synology / Caddy / Traefik），沿用它给的
+    # 协议与主机；否则用本层看到的。Jellyfin 的 /System/Info 用它拼对外地址
+    proxy_set_header X-Forwarded-Proto $movieclaw_forwarded_proto;
+    proxy_set_header X-Forwarded-Host $movieclaw_forwarded_host;
+    proxy_set_header Connection "";
+    proxy_connect_timeout 5s;
+    # SSE（任务中心/Agent 对话）与慢客户端的长下载：读写超时都放到 1 小时
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    send_timeout 600s;
+
+    # 后端 JSON 由本层压缩（此前 Next 反代时顺手压了）；不含 text/event-stream，
+    # SSE 压缩会被缓冲毁掉流式
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_types application/json application/javascript text/css text/plain
+               application/xml image/svg+xml;
+
+    map $http_x_forwarded_proto $movieclaw_forwarded_proto {
+        default $http_x_forwarded_proto;
+        ""      $scheme;
+    }
+    map $http_x_forwarded_host $movieclaw_forwarded_host {
+        default $http_x_forwarded_host;
+        ""      $http_host;
+    }
+
+    upstream movieclaw_api {
+        server 127.0.0.1:8000;
+        keepalive 32;
+    }
+    upstream movieclaw_web {
+        server 127.0.0.1:3001;
+        keepalive 16;
+    }
+
+    server {
+        # 只监听 IPv4：Docker 的端口发布走 IPv4，容器网络命名空间里 IPv6 常被禁用，
+        # 监听 [::] 会让 nginx 直接起不来
+        listen 0.0.0.0:__WEB_PORT__ default_server;
+        server_name _;
+
+        # ---- 后端直达 --------------------------------------------------
+        location ~* ^/api/v1(/|$) {
+            error_page 502 503 504 @api_starting;
+            proxy_pass http://movieclaw_api;
+        }
+        location ~* ^/(system|users|userviews|useritems|userplayeditems|userfavoriteitems|items|videos|shows|playingitems|branding|quickconnect|plugins|displaypreferences|emby)(/|$) {
+            error_page 502 503 504 @api_starting;
+            proxy_pass http://movieclaw_api;
+        }
+        location ~* ^/sessions(/(capabilities|playing)(/|$)|$) {
+            error_page 502 503 504 @api_starting;
+            proxy_pass http://movieclaw_api;
+        }
+        location ~* ^/library/(virtualfolders|mediafolders|physicalpaths|refresh)(/|$) {
+            error_page 502 503 504 @api_starting;
+            proxy_pass http://movieclaw_api;
+        }
+
+        # ---- 其余交给 Next ----------------------------------------------
+        location / {
+            error_page 502 503 504 =200 @web_starting;
+            proxy_pass http://movieclaw_web;
+        }
+
+        location @api_starting {
+            default_type application/json;
+            add_header Cache-Control no-store always;
+            return 503 '{"success": false, "code": "APP_STARTING", "message": "应用正在启动，请稍候", "details": null}';
+        }
+        location @web_starting {
+            root __ASSETS_DIR__;
+            add_header Cache-Control no-store always;
+            add_header X-Movieclaw-Starting 1 always;
+            rewrite ^ /starting.html break;
+        }
+    }
+}

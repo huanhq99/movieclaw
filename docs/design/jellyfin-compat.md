@@ -929,6 +929,14 @@ MediaFolders/PhysicalPaths/Refresh 四个 API 子路径。
 Idle）。有意放宽的偏离：真 Jellyfin 的 /Plugins 与 /Library/VirtualFolders
 是仅管理员（RequiresElevation）接口，这里放开给已认证设备但成员只见
 白名单库、不下发文件系统路径。
+**补遗（2026-08-20，nginx 前门）**：容器对外端口改由 nginx 接住
+（`docker/nginx.conf.template`），Jellyfin 命名空间与 `/api/v1` 直达 uvicorn，
+不再经 Next 反代——此前取流/整文件下载每 GB 要多烧约 10 个 CPU 秒（Node
+反代本身 5.4 秒 + 它小块慢读把 uvicorn 拖慢），并发下载时一个核被吃光。
+nginx 实测 0.7 秒/GB（`proxy_buffering off` + 64 KB 同步读缓冲；默认 4–8 KB
+缓冲是 2.9 秒/GB）。**nginx 的路由表必须与 `next.config.ts` 的 rewrites 同步
+维护**（命名空间清单、Sessions/Library 只放行字面子路径的规则一模一样），
+Next 侧的 rewrite 保留给裸机开发。
 考古备注：2026-08-04 曾在 `jellyfin-compat` 分支按真实 Infuse 逐轮实测
 修过同一问题（a50127f，含上述 rewrite 劫持教训与任务线映射），但该分支
 尾部 5 个提交从未合并进 main，v0.8.0 因此不含此修复——本次已吸收其成果

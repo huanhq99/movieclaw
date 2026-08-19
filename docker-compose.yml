@@ -20,6 +20,8 @@ services:
     container_name: movieclaw
     init: true
     ports:
+      # 容器内 nginx 前门监听 3000：页面走 Next，/api/v1 与 Jellyfin 播放接口
+      # 直达后端（取流/下载不经 Node，省 CPU）
       - "3000:3000"
       # Jellyfin 兼容层的局域网自动发现（可选）。注意：桥接网络下广播报文
       # 通常到不了容器，要用自动发现请改 host 网络或在控制台配置对外发布地址；

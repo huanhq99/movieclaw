@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -34,6 +34,48 @@ from movieclaw_downloader.models import (
 )
 
 logger = logging.getLogger("movieclaw_downloader.qbittorrent")
+
+# 按连接参数共享的底层客户端注册表。
+#
+# 上层（任务中心轮询、刷流引擎、进度巡检、投递……）习惯"每次操作 create_downloader
+# → 用完 close"，如果每个适配器实例都各自新建 qbittorrentapi.Client，就意味着每次操作
+# 都要重新做 DNS 解析、TCP/TLS 握手和 auth/login。任务中心每 5 秒轮询一次，NAS 现场
+# 实测 DNS 偶发丢包时一次解析要等 5 秒，接口耗时直接从 0.4s 变成 5.4s/10.4s。
+#
+# 这里把 Client（内部是带 keep-alive 连接池和已登录 SID 的 requests.Session）按
+# (url, 用户名, 密码, 超时) 复用：同一台下载器的所有调用共用一条长连接，DNS 与登录只
+# 在首次或连接失效重建时发生。qbittorrentapi 自带 403 自动重登与连接错误重试，旧连接
+# 被服务端/反代掐断时会透明重建，上层无感。
+#
+# 线程安全：适配器的阻塞调用都在 asyncio.to_thread 线程池里跑，requests.Session 的
+# 连接池本身支持多线程并发；qbittorrentapi 的登录状态标记在并发下最坏只是多登一次。
+_shared_clients: dict[tuple[str, str | None, str | None, float | None], qbittorrentapi.Client] = {}
+_shared_clients_lock = threading.Lock()
+
+
+def _shared_client(
+    url: str, username: str | None, password: str | None, timeout: float | None
+) -> qbittorrentapi.Client:
+    """取（或创建）对应连接参数的共享客户端。
+
+    同一 URL 换了凭据或超时（用户在设置页改了配置）时，旧条目一并丢弃：既避免注册表
+    随改密无限增长，也避免旧凭据的客户端继续被人拿到。
+    """
+    key = (url, username, password, timeout)
+    with _shared_clients_lock:
+        client = _shared_clients.get(key)
+        if client is None:
+            for stale in [k for k in _shared_clients if k[0] == url]:
+                _shared_clients.pop(stale, None)
+            client = qbittorrentapi.Client(
+                host=url,
+                username=username,
+                password=password,
+                REQUESTS_ARGS={"timeout": timeout},
+            )
+            _shared_clients[key] = client
+    return client
+
 
 # 提交后回查任务名称的重试节奏：qBittorrent 注册种子是异步的，
 # add 返回成功到 torrents_info 可查之间有极短的窗口期。
@@ -92,13 +134,16 @@ class QBittorrentDownloader(BaseDownloader):
     _qbt: qbittorrentapi.Client | None = None
 
     def _client(self) -> qbittorrentapi.Client:
-        """惰性创建底层客户端（构造无 IO；登录由库在首次请求时自动完成）。"""
+        """惰性取得底层客户端：同一下载器的所有适配器实例共享一条已登录长连接。
+
+        构造无 IO；登录由库在首次请求时自动完成。测试可直接注入 ``_qbt`` 假客户端。
+        """
         if self._qbt is None:
-            self._qbt = qbittorrentapi.Client(
-                host=self.config.url,
-                username=self.config.username,
-                password=self.config.password,
-                REQUESTS_ARGS={"timeout": self.config.timeout},
+            self._qbt = _shared_client(
+                self.config.url,
+                self.config.username,
+                self.config.password,
+                self.config.timeout,
             )
         return self._qbt
 
@@ -364,9 +409,7 @@ class QBittorrentDownloader(BaseDownloader):
                 # setSpeedLimitsMode 端点返回 404；状态一致时本就无需任何调用
                 current_alt = str(client.transfer_speed_limits_mode()) == "1"
                 if current_alt != limits.alt_speed_enabled:
-                    client.transfer_set_speed_limits_mode(
-                        intended_state=limits.alt_speed_enabled
-                    )
+                    client.transfer_set_speed_limits_mode(intended_state=limits.alt_speed_enabled)
             prefs: dict = {}
             if limits.queue_enabled is not None:
                 prefs["queueing_enabled"] = limits.queue_enabled
@@ -389,12 +432,8 @@ class QBittorrentDownloader(BaseDownloader):
         try:
             with _translate_errors(self.config.url):
                 # 显式关 auto-TMM，与 submit 同理：开启时分类规则会抢走目录控制权
-                client.torrents_set_auto_management(
-                    torrent_hashes=info_hash.lower(), enable=False
-                )
-                client.torrents_set_location(
-                    torrent_hashes=info_hash.lower(), location=save_path
-                )
+                client.torrents_set_auto_management(torrent_hashes=info_hash.lower(), enable=False)
+                client.torrents_set_location(torrent_hashes=info_hash.lower(), location=save_path)
         except qbittorrentapi.APIError as exc:
             raise DownloaderSubmitError(
                 "移动 qBittorrent 任务目录失败，请检查目标目录是否可写",
@@ -413,9 +452,10 @@ class QBittorrentDownloader(BaseDownloader):
         return DownloaderInfo(type=DownloaderType.QBITTORRENT, version=version)
 
     async def close(self) -> None:
-        client = self._qbt
-        if client is not None:
-            # 登出仅是礼貌行为，失败（如连接早已断开）不影响关闭
-            with contextlib.suppress(qbittorrentapi.exceptions.APIError):
-                await asyncio.to_thread(client.auth_log_out)
-            self._qbt = None
+        """释放本实例对共享客户端的引用。
+
+        刻意不调用 auth_log_out：客户端在同一下载器的所有适配器实例间共享，登出会把
+        大家正在用的 SID 作废，下一次调用又得重新登录，复用连接的意义就没了。
+        长连接本身交给 requests 连接池和进程生命周期管理。
+        """
+        self._qbt = None

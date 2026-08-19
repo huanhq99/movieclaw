@@ -84,7 +84,7 @@ if mode == "restart-after-ready-once":
         state.touch()
         threading.Timer(
             float(os.environ.get("FAKE_API_RESTART_DELAY_SECONDS", "3")),
-            lambda: os._exit(42),
+            lambda: os._exit(int(os.environ.get("FAKE_API_RESTART_EXIT_CODE", "42"))),
         ).start()
 if mode == "exit-after-ready":
     threading.Timer(
@@ -154,10 +154,30 @@ FakeServer(("127.0.0.1", 3001), Handler).serve_forever()
 
 _FAKE_NGINX = """#!{python}
 import json
+import os
+import re
+import signal
 import socketserver
+import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
+
+# 与真 nginx 一样吃 `-c <conf>`（从渲染后的配置里读 listen 端口）和
+# `-s reload`（给正在跑的实例发 HUP，让它重读配置、换监听口）。
+args = sys.argv[1:]
+conf = Path(args[args.index("-c") + 1])
+pid_file = conf.with_suffix(".pid")
+if "-s" in args:
+    os.kill(int(pid_file.read_text()), signal.SIGHUP)
+    raise SystemExit(0)
+pid_file.write_text(str(os.getpid()))
+
+
+def listen_port():
+    return int(re.search(r"listen (\\d+);", conf.read_text()).group(1))
 
 STARTING_PAGE = "<html><body>movieclaw 正在启动</body></html>".encode("utf-8")
 API_STARTING = json.dumps(
@@ -193,7 +213,21 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 {no_fqdn_server}
-FakeServer(("127.0.0.1", 3000), Handler).serve_forever()
+server = FakeServer(("127.0.0.1", listen_port()), Handler)
+
+
+def rebind(*_):
+    global server
+    old = server
+    server = FakeServer(("127.0.0.1", listen_port()), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    old.shutdown()
+
+
+signal.signal(signal.SIGHUP, rebind)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+while True:
+    signal.pause()
 """
 
 
@@ -541,3 +575,27 @@ def test_runtime_restart_keeps_web_alive(entrypoint_env: dict[str, str]) -> None
         output = _stop(process)
 
     assert "保持前端运行" in output
+
+
+def test_full_restart_switches_nginx_to_new_web_port(entrypoint_env: dict[str, str]) -> None:
+    """运行期改对外端口（端口文件）+ 43 全量重启：nginx 前门 reload 到新端口。"""
+    entrypoint_env["FAKE_API_MODE"] = "restart-after-ready-once"
+    entrypoint_env["FAKE_API_STATE_FILE"] = str(
+        Path(entrypoint_env["FAKE_WEB_MARKER"]).with_name("api-full-restart")
+    )
+    # restart-after-ready-once 以 42 退出；这里要的是全量重启 43
+    entrypoint_env["FAKE_API_RESTART_EXIT_CODE"] = "43"
+    entrypoint_env["FAKE_API_RESTART_DELAY_SECONDS"] = "4"
+    port_file = Path(entrypoint_env["MOVIECLAW_DATA_DIR"]) / "config" / "web-port"
+    process = _start_entrypoint(entrypoint_env)
+    try:
+        _wait_for_http_ok("http://127.0.0.1:3000/api/v1/health")
+        port_file.parent.mkdir(parents=True, exist_ok=True)
+        port_file.write_text("3010\n", encoding="utf-8")
+        # 43 触发 start_all → resolve_web_port 解析出 3010 → ensure_nginx_port reload
+        _wait_for_http_ok("http://127.0.0.1:3010/api/v1/health", timeout=15)
+        assert process.poll() is None
+    finally:
+        output = _stop(process)
+
+    assert "前门已切换到新的对外端口 3010" in output

@@ -3,8 +3,10 @@
 # movieclaw 容器入口：一个容器同时跑 nginx 前门、FastAPI 后端和 Next.js 前端。
 #
 # 进程模型：
-#   - nginx 监听对外唯一端口 3000，容器启动第一件事就是拉起它，并在容器整个
-#     生命周期内一直在（前后端怎么重启它都不动，端口永不消失）。路由见
+#   - nginx 监听对外唯一端口（默认 3000，可经环境变量 MOVIECLAW_WEB_PORT 或
+#     应用内「设置 → 应用设置」改，解析规则见 docker/resolve-web-port.sh），
+#     容器启动第一件事就是拉起它，并在容器整个生命周期内一直在（前后端怎么
+#     重启它都不动，端口永不消失；运行期换口靠 reload）。路由见
 #     docker/nginx.conf.template：/api/v1 与 Jellyfin 命名空间直达后端
 #     （播放器取流/下载不再经过 Node，每 GB 省约 10 个 CPU 秒），其余交给 Next
 #   - 后端监听容器内 127.0.0.1:8000，前端监听容器内 127.0.0.1:3001，都不对外
@@ -47,6 +49,10 @@ DATA_DIR="${MOVIECLAW_DATA_DIR:-$APP_ROOT/data}"
 RUNTIME_FILE="${MOVIECLAW_RUNTIME_FILE:-/etc/movieclaw-runtime}"
 UPDATES_DIR="$DATA_DIR/updates"
 STATE_DIR="$UPDATES_DIR/state"
+# 对外端口的应用内设置（「设置 → 应用设置」写入）。放在 data 卷上而不是
+# 数据库里：本脚本和 HEALTHCHECK 都不读数据库，且端口起不来时要就地回落。
+WEB_PORT_FILE="$DATA_DIR/config/web-port"
+export MOVIECLAW_WEB_PORT_FILE="$WEB_PORT_FILE"
 # overlay 启动失败的判定窗口与次数：启动后不足 GRACE 秒即退出算「启动失败」，
 # 同一版本连续失败 MAX 次即标记 bad 并回落
 STARTUP_GRACE_SECONDS="${MOVIECLAW_STARTUP_GRACE_SECONDS:-60}"
@@ -62,15 +68,14 @@ WEB_STARTUP_TIMEOUT_SECONDS="${MOVIECLAW_WEB_STARTUP_TIMEOUT_SECONDS:-60}"
 HEALTHCHECK_INTERVAL_SECONDS="${MOVIECLAW_HEALTHCHECK_INTERVAL_SECONDS:-10}"
 HEALTHCHECK_FAILURE_THRESHOLD="${MOVIECLAW_HEALTHCHECK_FAILURE_THRESHOLD:-6}"
 SHUTDOWN_GRACE_SECONDS="${MOVIECLAW_SHUTDOWN_GRACE_SECONDS:-20}"
-# 对外端口：nginx 监听它，也是 Docker HEALTHCHECK 探测的口
-WEB_PORT=3000
 # Next 在容器内的监听口（只给 nginx 反代用）
 NEXT_PORT=3001
 API_HEALTH_URL="http://127.0.0.1:8000/api/v1/health"
 # 前端直连探测：穿过 Next 自己的 /api/v1 rewrite 到后端，验证 Next 进程本身可用
 WEB_HEALTH_URL="http://127.0.0.1:$NEXT_PORT/api/v1/health"
-# 对外完整链路探测：nginx → 后端，即用户/Docker healthcheck 实际走的路径
-FRONT_HEALTH_URL="http://127.0.0.1:$WEB_PORT/api/v1/health"
+# 对外完整链路探测：nginx → 后端，即用户/Docker healthcheck 实际走的路径。
+# 对外端口（WEB_PORT）可配，此地址在 resolve_web_port 解析出端口后赋值
+FRONT_HEALTH_URL=""
 # nginx 的二进制、配置模板与占位页资源；测试用替身覆盖
 NGINX_BIN="${MOVIECLAW_NGINX_BIN:-nginx}"
 NGINX_TEMPLATE="${MOVIECLAW_NGINX_TEMPLATE:-/etc/movieclaw/nginx.conf.template}"
@@ -93,6 +98,65 @@ else
     RUNTIME_VERSION=0
 fi
 export MOVIECLAW_RUNTIME_VERSION="$RUNTIME_VERSION"
+
+# ---------------------------------------------------------------------------
+# 对外端口解析
+# ---------------------------------------------------------------------------
+# 端口来源与优先级都在 resolve-web-port.sh 里（设置文件 > 环境变量 > 3000），
+# Docker 的 HEALTHCHECK 调用的是同一个脚本——「前端监听的口」与「健康检查
+# 探的口」必须永远是同一个，各算各的会让用户一改端口容器就被判 unhealthy。
+# 解析脚本与本脚本同目录（镜像里同在 /，仓库里同在 docker/）。去掉 dirname
+# 在根目录下返回的那个斜杠，免得拼出 "//resolve-web-port.sh"。
+_ENTRYPOINT_DIR="$(dirname -- "${BASH_SOURCE[0]}")"
+PORT_RESOLVER="${MOVIECLAW_PORT_RESOLVER:-${_ENTRYPOINT_DIR%/}/resolve-web-port.sh}"
+WEB_PORT=3000
+WEB_PORT_SOURCE=default
+
+# 端口能否真正绑定。这是「应用内改端口」唯一的安全阀：用户改端口用的正是这个
+# Web 界面，新端口若起不来（被占用、非 root 下的特权端口），他就再也进不来了。
+# 因此在拉起任何进程之前先试绑一次——把人关在门外的代价远大于丢一次端口设置。
+# 失败原因原样打进容器日志（"Address already in use" 之类），非开发者也能看懂。
+web_port_is_bindable() {
+    "$PYTHON_BIN" -c '
+import socket, sys
+
+try:
+    with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", int(sys.argv[1])))
+except OSError as exc:
+    print(f"[entrypoint] 端口 {sys.argv[1]} 试绑失败：{exc}", file=sys.stderr)
+    raise SystemExit(1)
+' "$1"
+}
+
+# 跑一次解析脚本并把结果写进全局变量。脚本自身的警告（非法值等）照常进日志。
+apply_resolved_web_port() {
+    local line
+    line="$("$PORT_RESOLVER")" || line="3000 default"
+    WEB_PORT="${line%% *}"
+    WEB_PORT_SOURCE="${line##* }"
+}
+
+# 解析出本次要用的对外端口，并据此定 WEB_HEALTH_URL。
+# 来自设置文件的端口绑不上时就地废弃（改名留证，供设置页外显给用户）并回落。
+resolve_web_port() {
+    # 脚本缺失会一路静默退回 3000，让部署者配的 MOVIECLAW_WEB_PORT 和应用内
+    # 端口设置一起失效——那是「配了没生效」的哑故障，必须先喊出来。
+    if [ ! -r "$PORT_RESOLVER" ]; then
+        echo "[entrypoint] 找不到端口解析脚本 ${PORT_RESOLVER}：本次退回默认端口 3000，MOVIECLAW_WEB_PORT 与应用内端口设置都不会生效（镜像可能不完整）。" >&2
+    fi
+    apply_resolved_web_port
+    # 试绑只对"新"端口有意义：nginx 常驻，运行期（43 全量重启）重新解析出的
+    # 端口若正是它当前监听的口，试绑必然失败，不能据此把好设置废弃掉
+    if [ "$WEB_PORT_SOURCE" = "setting" ] && [ "$WEB_PORT" != "${NGINX_ACTIVE_PORT:-}" ] \
+        && ! web_port_is_bindable "$WEB_PORT"; then
+        echo "[entrypoint] 应用内设置的对外端口 $WEB_PORT 不可用，已废弃该设置并回落。" >&2
+        mv -f "$WEB_PORT_FILE" "$WEB_PORT_FILE.rejected" 2>/dev/null || rm -f "$WEB_PORT_FILE"
+        apply_resolved_web_port
+    fi
+    FRONT_HEALTH_URL="http://127.0.0.1:$WEB_PORT/api/v1/health"
+}
 
 # ---------------------------------------------------------------------------
 # overlay 解析
@@ -198,12 +262,15 @@ resolve_code() {
 # 测试钩子：只解析并打印结果，不拉起任何进程
 if [ "${1:-}" = "resolve" ]; then
     resolve_code
+    resolve_web_port
     echo "source=$ACTIVE_SOURCE"
     echo "version=$ACTIVE_VERSION"
     echo "backend_root=$BACKEND_ROOT"
     echo "web_root=$WEB_ROOT"
     echo "runtime=$RUNTIME_VERSION"
     echo "ner_dir=${MOVIECLAW_NER_DIR:-}"
+    echo "web_port=$WEB_PORT"
+    echo "web_port_source=$WEB_PORT_SOURCE"
     exit 0
 fi
 
@@ -216,7 +283,7 @@ cd "$APP_ROOT"
 # 数据库迁移由后端启动时自动执行（movieclaw_db/migrations.py），无需在此处理
 
 # 容器内后端端口显式钉死为 8000：它是 nginx 与 Next 的反代目标（后者构建时
-# 固化），不受部署者环境变量干扰；容器对外端口请改 compose 的 ports 映射。
+# 固化），不受部署者环境变量干扰。对外端口（nginx）则可配，见 resolve_web_port。
 API_PID=""
 WEB_PID=""
 WATCHDOG_PID=""
@@ -278,7 +345,7 @@ ensure_nginx_port() {
     fi
     render_nginx_config
     if "$NGINX_BIN" -c "$NGINX_RUN_DIR/nginx.conf" -s reload; then
-        echo "[entrypoint] 前门已切换到新的对外端口 $WEB_PORT（原 $NGINX_ACTIVE_PORT）。"
+        echo "[entrypoint] 前门已切换到新的对外端口 ${WEB_PORT}（原 ${NGINX_ACTIVE_PORT}）。"
         NGINX_ACTIVE_PORT="$WEB_PORT"
         # 看门狗探的是对外链路，必须跟着换口（看门狗随每次 start_all 重建，会读到新值）
         FRONT_HEALTH_URL="http://127.0.0.1:$WEB_PORT/api/v1/health"
@@ -510,14 +577,17 @@ start_current_code() {
 
 start_all() {
     resolve_code
-    # 对外端口若在此处被重新解析（运行期改端口 + 43 全量重启），前门随之换口
+    # 端口与代码来源一样每次全量启动都重新解析：设置页改端口正是通过 43
+    # 全量重启生效的（42 只重后端，前端不动，端口自然也不变）。解析出新端口
+    # 时 nginx 前门随之 reload 换口（常驻进程不随前后端重启）。
+    resolve_web_port
     ensure_nginx_port
     start_current_code "$API_STARTUP_TIMEOUT_SECONDS"
 }
 
 # 设置页重启（42）的快速路径：只重启后端，前端进程与用户的页面会话保持不动。
 # 后端不可用的窗口内 API 反代会短暂 502，但发起重启的页面本就处于轮询等待态；
-# 相比连前端一起冷重启，窗口更短、3000 端口也不会整体消失。看门狗必须先停——
+# 相比连前端一起冷重启，窗口更短、对外端口也不会整体消失。看门狗必须先停——
 # 否则窗口内预期的探测失败会被计成故障、把容器杀掉。代码来源保持当前已解析
 # 版本，不会误切 overlay。
 restart_api_keeping_web() {
@@ -687,7 +757,8 @@ wait_for_managed_process_exit() {
 
 EXIT_CODE=143
 # nginx 先于一切拉起并常驻：对外端口从此刻起就有人应答（启动期回占位页），
-# 前后端的任何重启都不再让端口消失。
+# 前后端的任何重启都不再让端口消失。拉起前先解析对外端口。
+resolve_web_port
 start_nginx
 if ! boot_until_running; then
     if [ "$SHUTTING_DOWN" -eq 1 ]; then

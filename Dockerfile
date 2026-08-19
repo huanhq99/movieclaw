@@ -10,7 +10,8 @@
 #     打包——启动迁移按「源码根目录」定位 alembic.ini，见 movieclaw_db/migrations.py）
 #   - NER 模型从 GitHub Release 下载后烧进镜像，开箱即用，无需用户手动放置
 #   - TMDB Key 通过构建参数烧进镜像（运行时可用环境变量覆盖）
-#   - 对外只暴露 3000 一个端口，由容器内 nginx 前门接住：/api/v1 与 Jellyfin
+#   - 对外只暴露一个端口（默认 3000，可用 MOVIECLAW_WEB_PORT 环境变量或应用内
+#     「设置 → 应用设置」改），由容器内 nginx 前门接住：/api/v1 与 Jellyfin
 #     命名空间直达后端，页面与静态资源交给 Next（docker/nginx.conf.template）
 #   - 运行期数据全部落在 /app/data，挂载这一个卷即可持久化
 #
@@ -206,7 +207,10 @@ RUN rm -rf ./web/node_modules/.pnpm/@img* ./web/node_modules/.pnpm/sharp@* \
 COPY --from=ner-model /model ./models/torrent-ner
 
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# 对外端口的解析脚本：entrypoint 与下面的 HEALTHCHECK 共用同一份逻辑，
+# 保证「nginx 监听的口」和「健康检查探的口」永远一致（见脚本内注释）。
+COPY docker/resolve-web-port.sh /resolve-web-port.sh
+RUN chmod +x /entrypoint.sh /resolve-web-port.sh
 # nginx 前门的配置模板（entrypoint 启动时渲染端口后拉起）与启动期占位页
 COPY docker/nginx.conf.template /etc/movieclaw/nginx.conf.template
 COPY docker/starting.html /usr/share/movieclaw/starting.html
@@ -247,11 +251,15 @@ ENV PATH="/venv/bin:${PATH}" \
 # 运行期数据（SQLite、日志、缓存、上传、密钥）全部落在这个目录
 VOLUME /app/data
 
+# 默认对外端口。改了端口（MOVIECLAW_WEB_PORT 或应用内设置）时这行不会跟着变，
+# 它只是镜像元数据；bridge 部署真正决定映射的是 compose 的 ports。
 EXPOSE 3000
 
 # 走对外端口打后端健康接口：验证 nginx 前门与 FastAPI（Next 进程由 entrypoint
-# 的看门狗单独探测，它挂了容器会主动退出交给 restart 策略）
+# 的看门狗单独探测，它挂了容器会主动退出交给 restart 策略）。
+# 端口不能写死——用户改过端口后仍要探到实际监听的那个口，否则容器会被判成
+# unhealthy。这里与 entrypoint 共用 /resolve-web-port.sh 的解析结果。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=6m --retries=3 \
-    CMD node -e "fetch('http://127.0.0.1:3000/api/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+    CMD PORT="$(/resolve-web-port.sh | cut -d' ' -f1)" node -e "fetch('http://127.0.0.1:' + process.env.PORT + '/api/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 ENTRYPOINT ["/entrypoint.sh"]

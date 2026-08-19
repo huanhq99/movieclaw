@@ -95,6 +95,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import hashlib
 import json
@@ -2929,6 +2930,11 @@ def request_sweep(source_path: str) -> None:
 _EVENT_QUIET_SECONDS = 3.0
 _EVENT_MAX_WAIT_SECONDS = 30.0
 
+# 观察者线程侧的同目录合并窗口：下载写入的 modified 风暴每秒可达上千条，
+# 逐条唤醒事件循环本身就是开销。窗口必须远小于 _EVENT_QUIET_SECONDS，
+# 否则消费者会把"事件被合并掉"误判成"已经安静"
+_EVENT_COALESCE_SECONDS = 0.5
+
 
 def _is_ingest_relevant(event) -> bool:  # noqa: ANN001
     """该文件事件是否值得触发巡检（观察者线程调用，只做纯判定）。
@@ -2957,13 +2963,21 @@ class IngestWatcher:
 
     def __init__(self) -> None:
         self._observer = None
+        # 源目录 → (handler, ObservedWatch)：差量重建的台账。
+        # 仅在持有 _refresh_lock 的工作线程里读写
+        self._entries: dict[str, tuple[object, object]] = {}
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._consumer: asyncio.Task | None = None
         self._catchup: asyncio.Task | None = None
+        # 初始建 watch 的后台任务：不阻塞应用启动（同 library_watch，issue #162）
+        self._startup: asyncio.Task | None = None
         self._available = True
+        self._closed = False
         # 当前实际在监听的源目录集合：兜底巡检据此跳过它们（事件路径已负责）
         self._watched: set[str] = set()
+        # 同目录合并的最近投递时刻（观察者的单一 dispatch 线程读写，无需锁）
+        self._recent_keys: dict[str, float] = {}
         # 静默到点自检任务：每个源目录至多挂一个
         self._rechecks: dict[str, asyncio.Task] = {}
         # 串行化重建：并发的规则编辑各自触发 refresh，并发重建会互踩 _observer
@@ -2978,19 +2992,30 @@ class IngestWatcher:
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._consumer = asyncio.create_task(self._consume())
+        # 初始建 watch 放后台：网络挂载上的递归建 watch 可达分钟级，不能
+        # 拖住 FastAPI startup（entrypoint 有就绪超时，issue #162）
+        self._startup = asyncio.create_task(self._startup_refresh())
+
+    async def _startup_refresh(self) -> None:
         # refresh_watches 会把初次纳入监听的目录逐个投队列补扫（覆盖停机
         # 期间完成的下载），不做独立的全量扫描
-        await self.refresh_watches()
+        try:
+            await self.refresh_watches()
+        except Exception:  # noqa: BLE001 -- 后台任务无人 await，异常必须就地落日志
+            logger.exception("监听导入初始化失败（每小时兜底巡检仍会发现完成的下载）")
+            return
         if not self._available:
             # watchdog 缺失：事件路径不存在，开机全量补扫一次顶上
             self._catchup = asyncio.create_task(ingest_tick())
 
     async def stop(self) -> None:
-        for task in (self._consumer, self._catchup, *self._rechecks.values()):
+        self._closed = True
+        for task in (self._consumer, self._catchup, self._startup, *self._rechecks.values()):
             if task is not None:
                 task.cancel()
         self._consumer = None
         self._catchup = None
+        self._startup = None
         self._rechecks.clear()
         # 与后台重建互斥：重建正在工作线程里装配新观察者时直接停旧引用，
         # 会漏掉刚装好的那个（关停竞态）；拿到锁再停则必停到最终的观察者
@@ -3002,17 +3027,21 @@ class IngestWatcher:
             self._observer.stop()
             self._observer.join(timeout=5)
             self._observer = None
+        self._entries.clear()
+        self._watched = set()
 
     async def refresh_watches(self) -> None:
-        """按当前监听导入规则重建监听（规则增删改后调用）。
+        """按当前监听导入规则**差量**调整监听（规则增删改后调用）。
 
-        重建的磁盘部分（停旧观察者 join、recursive 建 watch、网络挂载上的
-        is_dir）都是阻塞调用，放线程池执行，不冻住事件循环（同 library_watch）。
+        磁盘部分（recursive 建 watch、网络挂载上的 is_dir、拆 watch 的
+        join）都是阻塞调用，放线程池执行，不冻住事件循环（同 library_watch）。
+        差量意味着只有新增/移除/失效的源目录付建 watch 的成本；每小时的
+        兜底巡检借同一入口恢复失效监听，未变的目录零开销。
         """
-        if not self._available:
+        if not self._available or self._closed:
             return
         try:
-            import watchdog  # noqa: F401 -- 仅探测可用性，实际使用在 _rebuild_observer
+            import watchdog  # noqa: F401 -- 仅探测可用性，实际使用在 _apply_watches
         except ImportError:
             self._available = False
             logger.warning("未安装 watchdog，监听导入不实时——完成的下载靠每小时兜底巡检发现")
@@ -3021,55 +3050,113 @@ class IngestWatcher:
         rules = await _load_rules()
         source_paths = [rule.source_path for rule, _library in rules]
         async with self._refresh_lock:
-            newly_watched = await asyncio.to_thread(self._rebuild_observer, source_paths)
+            newly_watched = await asyncio.to_thread(self._apply_watches, source_paths)
         # 初次纳入监听的目录补扫一次：监听建立之前完成的下载（停机期间/
         # 目录刚就绪/刚加进配置）不会再产生事件，只有这一次主动扫能接住；
         # 之后全靠事件驱动，不再主动扫它。队列操作回到事件循环线程再做
         for key in sorted(newly_watched):
             self._queue.put_nowait(key)
 
-    def _rebuild_observer(self, source_paths: list[str]) -> set[str]:
-        """（工作线程）停掉旧观察者并按源目录清单重建；返回新纳入监听的目录。"""
-        from watchdog.events import FileSystemEventHandler
+    def _apply_watches(self, source_paths: list[str]) -> set[str]:
+        """（工作线程）差量调整监听；返回**初次**纳入监听的目录。
+
+        失效后恢复的目录不算"初次"——原目录早已做过基线补扫，重复补扫
+        会把存量当新增重处理。失活检测同 library_watch：读观察者内部表，
+        拿不到就当作存活（宁可漏检由兜底巡检接住，不能误拆好监听）。
+        """
         from watchdog.observers import Observer
+
+        if self._closed:
+            return set()
+        if self._observer is None:
+            observer = Observer()
+            observer.daemon = True
+            observer.start()
+            self._observer = observer
+        observer = self._observer
+
+        # key 必须保持 rule.source_path 原样：消费侧回查规则、兜底巡检的
+        # watched_keys 对比都按原字符串匹配，归一化会让两头失配
+        desired = dict.fromkeys(source_paths)  # 去重且保序
+        previously_watched = set(self._entries)
+        for key, (handler, watch) in list(self._entries.items()):
+            if key in desired and self._watch_alive(observer, watch):
+                continue
+            self._entries.pop(key, None)
+            # KeyError 一律吞掉：watch 可能已随 emitter 死亡被 watchdog 清理
+            with contextlib.suppress(KeyError):
+                observer.remove_handler_for_watch(handler, watch)
+            with contextlib.suppress(KeyError):
+                observer.unschedule(watch)
+        added = 0
+        for source_path in desired:
+            if self._closed:
+                break
+            if source_path in self._entries:
+                continue
+            if not os.path.isdir(source_path):
+                continue  # 目录未就绪：兜底巡检持续兜着，不告警刷屏
+            handler = self._make_handler(source_path)
+            try:
+                # recursive 建 watch 在本线程同步走完整棵树（watchdog 在
+                # 调用线程里跑 on_thread_start），大树/网络挂载慢在这里；
+                # 超 inotify watch 上限（ENOSPC）也在这里抛，按目录隔离
+                watch = observer.schedule(handler, source_path, recursive=True)
+            except OSError as exc:
+                logger.warning("监听源目录失败（%s）：%s", source_path, exc)
+                continue
+            self._entries[source_path] = (handler, watch)
+            added += 1
+        self._watched = set(self._entries)
+        if added:
+            logger.info(
+                "监听导入已更新：新增 %d 个，共监听 %d 个源目录", added, len(self._entries)
+            )
+        return self._watched - previously_watched
+
+    @staticmethod
+    def _watch_alive(observer, watch) -> bool:  # noqa: ANN001
+        try:
+            emitter = observer._emitter_for_watch.get(watch)  # noqa: SLF001
+        except AttributeError:  # watchdog 内部结构变化：当作存活
+            return True
+        return emitter is not None and emitter.is_alive()
+
+    def _make_handler(self, source_path: str):  # noqa: ANN202
+        from watchdog.events import FileSystemEventHandler
 
         watcher = self
 
         class _Handler(FileSystemEventHandler):
-            """事件回调（观察者线程）：只投递源目录标识，不做任何业务。"""
-
-            def __init__(self, source_path: str) -> None:
-                self._key = source_path
+            """事件回调（观察者 dispatch 线程）：判定 + 合并 + 投递，不做业务。"""
 
             def on_any_event(self, event) -> None:  # noqa: ANN001
-                if _is_ingest_relevant(event):
-                    watcher._enqueue_threadsafe(self._key)
+                if _is_ingest_relevant(event) and watcher._should_enqueue(source_path):
+                    watcher._enqueue_threadsafe(source_path)
 
-        self._stop_observer()
-        observer = Observer()
-        watched: set[str] = set()
-        for source_path in source_paths:
-            if not Path(source_path).is_dir():
-                continue  # 目录未就绪：兜底巡检持续兜着，不告警刷屏
-            try:
-                observer.schedule(_Handler(source_path), source_path, recursive=True)
-                watched.add(source_path)
-            except OSError as exc:
-                logger.warning("监听源目录失败（%s）：%s", source_path, exc)
-        newly_watched = watched - self._watched
-        self._watched = watched
-        if watched:
-            observer.daemon = True
-            observer.start()
-            self._observer = observer
-            logger.info("监听导入已启动：监听 %d 个源目录", len(watched))
-        return newly_watched
+        return _Handler()
 
     # -- 事件通道 ----------------------------------------------------------
 
     def poke(self, source_path: str) -> None:
         """外部请求巡检某源目录（人工恢复处理后的立即重看）。事件循环线程调用。"""
         self._queue.put_nowait(source_path)
+
+    def _should_enqueue(self, key: str) -> bool:
+        """（观察者 dispatch 线程）同目录合并：短窗口内不重复跨线程投递。
+
+        所有 handler 都在观察者唯一的 dispatch 线程回调，无需加锁。
+        """
+        now = time.monotonic()
+        last = self._recent_keys.get(key)
+        if last is not None and now - last < _EVENT_COALESCE_SECONDS:
+            return False
+        if len(self._recent_keys) > 512:
+            self._recent_keys = {
+                k: t for k, t in self._recent_keys.items() if now - t < _EVENT_COALESCE_SECONDS
+            }
+        self._recent_keys[key] = now
+        return True
 
     def _enqueue_threadsafe(self, key: str) -> None:
         loop = self._loop

@@ -234,7 +234,7 @@ save_path（同机/同挂载假设），路径不可达时给容器映射引导�
 ### L4 增强——✅ 已完成（2026-07-19，洗版除外）
 | 事项 | 实现 |
 |---|---|
-| watchdog 实时监控 | ✅ `library_watch.py`：事件只投队列（观察者线程零业务）→ 去抖批处理（安静 3s / 兜底 30s）→ 增量扫描；写入落定靠去抖窗口 + 对账兜底（不在事件线程 sleep——moviebot 反面教训）；库增删改自动重建监听；watchdog 缺失/根路径未就绪优雅降级 |
+| watchdog 实时监控 | ✅ `library_watch.py`：事件只投队列（观察者线程零业务，同键 0.5s 合并再跨线程投递）→ 去抖批处理（安静 3s / 兜底 30s）→ **范围扫描**（事件折算成根下第一级条目交给 scan 的 scope_paths，只遍历变动子树，存疑退回整库）；写入落定靠去抖窗口 + 对账兜底（不在事件线程 sleep——moviebot 反面教训）；库增删改**差量**调整监听（只为变化的根付建 watch 成本）；建 watch 全程后台执行不阻塞应用启动（issue #162）；库级 `realtime_watch` 开关（默认开）可按库关闭实时监控——SMB/NFS 网络挂载收不到远端事件、建 watch 又慢，关闭后靠定期对账与手动扫描；watchdog 缺失/根路径未就绪优雅降级 |
 | NFO 写出 | ✅ 入库时条目目录生成 movie.nfo/tvshow.nfo（tmdbid/imdb uniqueid）；**既有 NFO 绝不覆盖**；双向价值：Emby 零歧义 + 自家重扫免收敛 |
 | 通知媒体服务器 | ✅ MEDIA_SERVER_URL/TYPE/TOKEN 配置后入库成功即触发 Emby/Jellyfin `/Library/Refresh`；失败只告警不阻断 |
 | 识别增强 | ✅ 原盘识别（BDMV/VIDEO_TS 整目录一个条目、主流文件探测、盘容量合计；.iso 纳入扫描）+ 电影**时长消歧**（歧义候选 × 实测时长 ±2min 唯一命中，决策 6 由此闭环）|

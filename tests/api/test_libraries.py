@@ -215,6 +215,44 @@ def test_update_name_and_paths(client) -> None:
     assert data["root_paths"] == ["/media/movies", "/mnt/disk2/movies"]
 
 
+def test_realtime_watch_defaults_on_and_survives_omission(client) -> None:
+    """实时监控开关：新建默认开；更新请求不带该字段时保持原值（老客户端
+    不能把用户关掉的监控悄悄打开）；显式传值时正常切换。"""
+    row = _create(client, name="电影库", kind="movie", root="/media/movies")
+    assert row["realtime_watch"] is True  # 默认开（与 Emby/Plex 一致）
+
+    # 显式关闭（SMB/NFS 网络挂载的典型选择）
+    r = client.put(
+        f"/api/v1/libraries/{row['id']}",
+        json={
+            "name": "电影库",
+            "kind": "movie",
+            "root_paths": ["/media/movies"],
+            "realtime_watch": False,
+        },
+    )
+    assert r.json()["data"]["realtime_watch"] is False
+
+    # 请求体不带该字段：保持关闭，不被静默重置
+    r = client.put(
+        f"/api/v1/libraries/{row['id']}",
+        json={"name": "电影库", "kind": "movie", "root_paths": ["/media/movies"]},
+    )
+    assert r.json()["data"]["realtime_watch"] is False
+
+    # 新建时也可以直接关
+    r = client.post(
+        "/api/v1/libraries",
+        json={
+            "name": "网络库",
+            "kind": "movie",
+            "root_paths": ["/mnt/smb/movies"],
+            "realtime_watch": False,
+        },
+    )
+    assert r.json()["data"]["realtime_watch"] is False
+
+
 def test_update_root_scan_receives_previous_roots(client, monkeypatch) -> None:
     """改根的持久扫描作业必须带上修改前根列表，不能从历史台账反推。"""
     from movieclaw_api.api.routes import libraries as library_routes

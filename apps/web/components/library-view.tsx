@@ -1079,6 +1079,9 @@ export function LibraryFormDialog({
   const [matchRegions, setMatchRegions] = useState<string[]>([]);
   // 扫描后自动清理已确认丢失的库存记录（默认关，见 Library.auto_clear_missing）
   const [autoClearMissing, setAutoClearMissing] = useState(false);
+  // 实时文件监控（默认开）：SMB/NFS 网络挂载收不到远端变更事件、递归建
+  // 监听还很慢，按库关闭后靠定期对账与手动扫描（见 Library.realtime_watch）
+  const [realtimeWatch, setRealtimeWatch] = useState(true);
   // 表单分两个页签：必填的基本信息 / 可选的收藏范围，避免单页长滚动拥挤
   const [tab, setTab] = useState<"basic" | "scope">("basic");
   const routingOptions = useRoutingOptions();
@@ -1094,6 +1097,7 @@ export function LibraryFormDialog({
     setMatchGenres(parsed.genres);
     setMatchRegions(parsed.regions);
     setAutoClearMissing(library?.auto_clear_missing ?? false);
+    setRealtimeWatch(library?.realtime_watch ?? true);
     setPickerTarget(null);
     setTab("basic");
   }, [state, library]);
@@ -1123,6 +1127,7 @@ export function LibraryFormDialog({
       root_paths: roots,
       match_rules: buildMatchRules(genres, matchRegions),
       auto_clear_missing: autoClearMissing,
+      realtime_watch: realtimeWatch,
     };
     void (library ? updateLibrary(library.id, payload) : createLibrary(payload))
       .then(onSaved)
@@ -1323,6 +1328,32 @@ export function LibraryFormDialog({
               新入库的内容落在<strong className="font-medium text-[var(--text-muted)]">主根</strong>下：主根/标题
               (年份)。其余为扩展根：扫描与监控照常覆盖，但不写入新内容。
             </p>
+          </div>
+
+          {/* 实时文件监控：默认开。SMB/NFS 网络挂载收不到远端变更事件、
+              递归建监听又慢（大库可达分钟级），按库关闭后新文件由定期
+              对账与手动扫描发现（不实时但不缺失） */}
+          <div>
+            <label className="flex cursor-pointer select-none items-start gap-2.5">
+              <input
+                type="checkbox"
+                checked={realtimeWatch}
+                onChange={(e) => setRealtimeWatch(e.target.checked)}
+                className="mt-0.5 size-4 shrink-0 accent-[var(--accent)]"
+              />
+              <span className="min-w-0">
+                <span className="block text-ui font-medium text-[var(--text)]">
+                  实时监控目录变化
+                </span>
+                <span className="mt-1 block text-caption leading-relaxed text-[var(--text-faint)]">
+                  监听根路径的文件变动，新文件落盘后自动增量扫描入库。
+                  <strong className="font-medium text-[var(--text-muted)]">
+                    SMB/NFS 等网络挂载建议关闭
+                  </strong>
+                  ——远端的文件变化收不到通知，建立监听还可能非常缓慢。关闭后新文件由定期对账和手动扫描发现，不实时但不会缺失。
+                </span>
+              </span>
+            </label>
           </div>
 
           {/* 自动清理丢失记录：默认关。开着才在扫描收尾把"磁盘上确认没了"的

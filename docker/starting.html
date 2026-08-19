@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>movieclaw 正在启动</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center;
+         justify-content: center; background: #0b0f17; color: #e2e8f0;
+         font-family: system-ui, sans-serif; }
+  .card { text-align: center; padding: 2rem; max-width: 32rem; }
+  .spin { margin: 0 auto 1.25rem; width: 2rem; height: 2rem; border-radius: 50%;
+          border: 3px solid rgba(226,232,240,.25); border-top-color: #e2e8f0;
+          animation: r 1s linear infinite; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  p { margin: .4rem 0; }
+  .sub { color: #94a3b8; font-size: .875rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="spin"></div>
+  <p>movieclaw 正在启动，请稍候……</p>
+  <p class="sub">首次启动或更新后可能需要执行数据迁移，通常几秒到几分钟。就绪后本页会自动进入应用。</p>
+</div>
+<script>
+// 本页由 nginx 在前端进程尚未就绪时代答（带 X-Movieclaw-Starting 头）。
+// 轮询当前地址本身：头消失说明前端已接管，刷新即进入应用。不能只探
+// /api/v1/health——后端先于前端就绪，那样会在前端起来前反复刷新。
+setInterval(function () {
+  fetch(location.href, { cache: "no-store", redirect: "manual" }).then(function (r) {
+    if (!r.headers.get("x-movieclaw-starting")) { location.reload(); }
+  }).catch(function () {});
+}, 2000);
+</script>
+</body>
+</html>

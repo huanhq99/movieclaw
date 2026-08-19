@@ -3,6 +3,10 @@
 这里不依赖 Docker：临时目录中的假 API 与假 Next 进程分别模拟后端监听、
 启动即退出、永久卡住和健康接口退化。测试的是 entrypoint 的真实子进程关系，
 从而锁住「前端不得在后端未就绪时启动」这一部署契约。
+
+nginx 前门用一个 Python 替身（MOVIECLAW_NGINX_BIN）：按 docker/nginx.conf.template
+的语义把 /api/* 转给 8000、其余转给 3001，上游连不上时回占位页/503——
+entrypoint 只关心它被何时拉起、何时退出，真实 nginx 配置由镜像构建期 nginx -t 把关。
 """
 
 from __future__ import annotations
@@ -80,7 +84,7 @@ if mode == "restart-after-ready-once":
         state.touch()
         threading.Timer(
             float(os.environ.get("FAKE_API_RESTART_DELAY_SECONDS", "3")),
-            lambda: os._exit(42),
+            lambda: os._exit(int(os.environ.get("FAKE_API_RESTART_EXIT_CODE", "42"))),
         ).start()
 if mode == "exit-after-ready":
     threading.Timer(
@@ -144,7 +148,86 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 {no_fqdn_server}
-FakeServer(("127.0.0.1", 3000), Handler).serve_forever()
+FakeServer(("127.0.0.1", 3001), Handler).serve_forever()
+"""
+
+
+_FAKE_NGINX = """#!{python}
+import json
+import os
+import re
+import signal
+import socketserver
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
+
+# 与真 nginx 一样吃 `-c <conf>`（从渲染后的配置里读 listen 端口）和
+# `-s reload`（给正在跑的实例发 HUP，让它重读配置、换监听口）。
+args = sys.argv[1:]
+conf = Path(args[args.index("-c") + 1])
+pid_file = conf.with_suffix(".pid")
+if "-s" in args:
+    os.kill(int(pid_file.read_text()), signal.SIGHUP)
+    raise SystemExit(0)
+pid_file.write_text(str(os.getpid()))
+
+
+def listen_port():
+    return int(re.search(r"listen (\\d+);", conf.read_text()).group(1))
+
+STARTING_PAGE = "<html><body>movieclaw 正在启动</body></html>".encode("utf-8")
+API_STARTING = json.dumps(
+    {{"success": False, "code": "APP_STARTING", "message": "starting", "details": None}}
+).encode("utf-8")
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        upstream = 8000 if self.path.startswith("/api/") else 3001
+        try:
+            with urlopen(f"http://127.0.0.1:{{upstream}}{{self.path}}", timeout=1) as response:
+                status, body = response.status, response.read()
+        except HTTPError as exc:
+            status, body = exc.code, exc.read()
+        except (OSError, URLError):
+            if upstream == 8000:
+                self._respond(503, API_STARTING, [("Content-Type", "application/json")])
+            else:
+                self._respond(200, STARTING_PAGE, [("X-Movieclaw-Starting", "1")])
+            return
+        self._respond(status, body, [])
+
+    def _respond(self, status, body, headers):
+        self.send_response(status)
+        for key, value in headers:
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+{no_fqdn_server}
+server = FakeServer(("127.0.0.1", listen_port()), Handler)
+
+
+def rebind(*_):
+    global server
+    old = server
+    server = FakeServer(("127.0.0.1", listen_port()), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    old.shutdown()
+
+
+signal.signal(signal.SIGHUP, rebind)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+while True:
+    signal.pause()
 """
 
 
@@ -169,6 +252,12 @@ def entrypoint_env(tmp_path: Path) -> dict[str, str]:
         bin_dir / "node",
         _FAKE_WEB.format(python=sys.executable, no_fqdn_server=_NO_FQDN_SERVER),
     )
+    _write_executable(
+        bin_dir / "fake-nginx",
+        _FAKE_NGINX.format(python=sys.executable, no_fqdn_server=_NO_FQDN_SERVER),
+    )
+    nginx_template = tmp_path / "nginx.conf.template"
+    nginx_template.write_text("listen __WEB_PORT__; root __ASSETS_DIR__;\n", encoding="utf-8")
 
     return {
         **os.environ,
@@ -177,6 +266,10 @@ def entrypoint_env(tmp_path: Path) -> dict[str, str]:
         "MOVIECLAW_DATA_DIR": str(data_dir),
         "MOVIECLAW_RUNTIME_FILE": str(runtime_file),
         "MOVIECLAW_PYTHON_BIN": str(bin_dir / "fake-api"),
+        "MOVIECLAW_NGINX_BIN": str(bin_dir / "fake-nginx"),
+        "MOVIECLAW_NGINX_TEMPLATE": str(nginx_template),
+        "MOVIECLAW_NGINX_ASSETS_DIR": str(tmp_path),
+        "MOVIECLAW_NGINX_RUN_DIR": str(tmp_path / "nginx-run"),
         # 模拟进程需经历 shell 调度和一次真实 HTTP 请求；留出余量避免把
         # 「验证启动顺序」的测试写成三秒竞速。
         "MOVIECLAW_API_STARTUP_TIMEOUT_SECONDS": "6",
@@ -294,7 +387,7 @@ def test_web_starts_only_after_api_is_ready(entrypoint_env: dict[str, str]) -> N
 
 
 def test_placeholder_page_serves_during_startup(entrypoint_env: dict[str, str]) -> None:
-    """后端就绪前 3000 由占位页顶住：页面 200、/api 503，就绪后让位给真前端。"""
+    """后端就绪前 3000 由 nginx 前门代答：页面 200、/api 503，就绪后穿透到真前端。"""
     entrypoint_env["FAKE_API_MODE"] = "serve"
     entrypoint_env["FAKE_API_DELAY_SECONDS"] = "3"
     marker = Path(entrypoint_env["FAKE_WEB_MARKER"])
@@ -306,11 +399,47 @@ def test_placeholder_page_serves_during_startup(entrypoint_env: dict[str, str]) 
         api_status, _ = _http_get("http://127.0.0.1:3000/api/v1/health")
         assert api_status == 503
         _wait_for_file(marker)
-        # 占位页已让位：健康接口最终穿透真前端反代到后端返回 2xx
+        # 上游就绪：健康接口最终穿透前门到后端返回 2xx，页面穿透到前端
         _wait_for_http_ok("http://127.0.0.1:3000/api/v1/health")
+        _wait_for_http_ok("http://127.0.0.1:3001/api/v1/health")
         assert process.poll() is None
+        # 渲染出的 nginx 配置把端口与资源目录占位符都替换掉了
+        rendered = Path(entrypoint_env["MOVIECLAW_NGINX_RUN_DIR"]) / "nginx.conf"
+        assert rendered.read_text(encoding="utf-8") == (
+            f"listen 3000; root {entrypoint_env['MOVIECLAW_NGINX_ASSETS_DIR']};\n"
+        )
     finally:
         _stop(process)
+
+
+def test_nginx_exit_stops_container(entrypoint_env: dict[str, str]) -> None:
+    """前门进程退出等于对外端口消失，容器必须失败退出交给 Docker 拉起。"""
+    entrypoint_env["FAKE_API_MODE"] = "serve"
+    marker = Path(entrypoint_env["FAKE_WEB_MARKER"])
+    process = _start_entrypoint(entrypoint_env)
+    try:
+        _wait_for_file(marker)
+        _wait_for_http_ok("http://127.0.0.1:3000/api/v1/health")
+        # 找到替身 nginx 并杀掉：它是 entrypoint 的直接子进程
+        pgrep = subprocess.run(
+            ["pgrep", "-f", entrypoint_env["MOVIECLAW_NGINX_BIN"]],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        pids = [int(p) for p in pgrep.stdout.split()]
+        assert pids, "替身 nginx 应在运行"
+        for pid in pids:
+            os.kill(pid, 9)
+        output, _ = process.communicate(timeout=8)
+    finally:
+        output = _stop(process) if process.poll() is None else output
+
+    # 与前后端崩溃一致：原样透传子进程退出码（被 SIGKILL 即 137）
+    assert process.returncode == 137, output
+    assert "nginx 前门退出" in output
+    record = _read_last_exit(entrypoint_env)
+    assert record["reason"] == "nginx_crash"
 
 
 def test_api_exit_before_ready_never_starts_web(entrypoint_env: dict[str, str]) -> None:
@@ -446,3 +575,27 @@ def test_runtime_restart_keeps_web_alive(entrypoint_env: dict[str, str]) -> None
         output = _stop(process)
 
     assert "保持前端运行" in output
+
+
+def test_full_restart_switches_nginx_to_new_web_port(entrypoint_env: dict[str, str]) -> None:
+    """运行期改对外端口（端口文件）+ 43 全量重启：nginx 前门 reload 到新端口。"""
+    entrypoint_env["FAKE_API_MODE"] = "restart-after-ready-once"
+    entrypoint_env["FAKE_API_STATE_FILE"] = str(
+        Path(entrypoint_env["FAKE_WEB_MARKER"]).with_name("api-full-restart")
+    )
+    # restart-after-ready-once 以 42 退出；这里要的是全量重启 43
+    entrypoint_env["FAKE_API_RESTART_EXIT_CODE"] = "43"
+    entrypoint_env["FAKE_API_RESTART_DELAY_SECONDS"] = "4"
+    port_file = Path(entrypoint_env["MOVIECLAW_DATA_DIR"]) / "config" / "web-port"
+    process = _start_entrypoint(entrypoint_env)
+    try:
+        _wait_for_http_ok("http://127.0.0.1:3000/api/v1/health")
+        port_file.parent.mkdir(parents=True, exist_ok=True)
+        port_file.write_text("3010\n", encoding="utf-8")
+        # 43 触发 start_all → resolve_web_port 解析出 3010 → ensure_nginx_port reload
+        _wait_for_http_ok("http://127.0.0.1:3010/api/v1/health", timeout=15)
+        assert process.poll() is None
+    finally:
+        output = _stop(process)
+
+    assert "前门已切换到新的对外端口 3010" in output

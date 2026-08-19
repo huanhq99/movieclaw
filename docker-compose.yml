@@ -20,6 +20,8 @@ services:
     container_name: movieclaw
     init: true
     ports:
+      # 容器内由 nginx 前门监听 3000：页面走 Next，/api/v1 与 Jellyfin 播放接口
+      # 直达后端（取流/下载不经 Node，省 CPU）。
       # 左边是宿主端口，改它就能换访问端口（如 "8096:3000"），容器内保持 3000。
       # 只有 host 网络/裸机等「容器内端口就是宿主端口」的形态才需要动右边——
       # 那种情况下把右边和下面的 MOVIECLAW_WEB_PORT 一起改，或直接在

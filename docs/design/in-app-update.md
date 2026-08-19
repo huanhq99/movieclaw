@@ -31,7 +31,7 @@ Docker 镜像的构建和分发都很重，而实际频繁变动的只有前端�
                                              web/       (standalone 产物)
                                              manifest.json
                                            current -> versions/v0.2.0   （原子切换）
-                                         models/torrent-ner-v2/         （模型独立更新）
+                                         models/torrent-ner-v3/         （模型独立更新）
 ```
 
 核心原则：**更新不覆盖镜像内文件，只改变进程的启动指向。**

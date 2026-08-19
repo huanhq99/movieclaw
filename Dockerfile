@@ -10,8 +10,9 @@
 #     打包——启动迁移按「源码根目录」定位 alembic.ini，见 movieclaw_db/migrations.py）
 #   - NER 模型从 GitHub Release 下载后烧进镜像，开箱即用，无需用户手动放置
 #   - TMDB Key 通过构建参数烧进镜像（运行时可用环境变量覆盖）
-#   - 对外只暴露前端一个端口（默认 3000，可用 MOVIECLAW_WEB_PORT 环境变量或
-#     应用内「设置 → 应用设置」改），/api/v1 由 Next 反代到容器内的后端
+#   - 对外只暴露一个端口（默认 3000，可用 MOVIECLAW_WEB_PORT 环境变量或应用内
+#     「设置 → 应用设置」改），由容器内 nginx 前门接住：/api/v1 与 Jellyfin
+#     命名空间直达后端，页面与静态资源交给 Next（docker/nginx.conf.template）
 #   - 运行期数据全部落在 /app/data，挂载这一个卷即可持久化
 #
 # 构建（推荐用 scripts/build-image.sh，会自动带上 TMDB Key）：
@@ -79,7 +80,7 @@ RUN python -c "import tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))
 # ---------------------------------------------------------------------------
 # 模型文件与架构无关，同样跑在构建机原生架构上
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS ner-model
-ARG NER_MODEL_BASE=https://github.com/yipengfei329/movieclaw/releases/download/torrent-ner-v2
+ARG NER_MODEL_BASE=https://github.com/yipengfei329/movieclaw/releases/download/torrent-ner-v3
 ARG APT_MIRROR=""
 RUN if [ -n "$APT_MIRROR" ]; then \
         sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
@@ -148,13 +149,16 @@ FROM python:3.12-slim-bookworm
 #   跨架构字体也让构建期可以真正生成 PGS，再 OCR 回 SRT 验证完整调用链
 # - libicu72：seconv 自包含 .NET 运行时仍需要 ICU 提供区域/Unicode 数据；
 #   缺失时进程会在加载字幕格式类型前直接 FailFast
+# - nginx：容器内统一前门。播放器取流/整文件下载直达后端而不经 Node 反代
+#   （Node 每 GB 多烧约 10 个 CPU 秒），同时在前后端重启窗口代答占位页。
+#   只要核心包（proxy/gzip/map/rewrite 都是静态内置模块），不装推荐的动态模块
 ARG APT_MIRROR=""
 RUN if [ -n "$APT_MIRROR" ]; then \
         sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
     fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        libstdc++6 ca-certificates ffmpeg fontconfig fonts-dejavu-core libicu72 \
+        libstdc++6 ca-certificates ffmpeg fontconfig fonts-dejavu-core libicu72 nginx \
         tesseract-ocr \
         tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
         tesseract-ocr-jpn tesseract-ocr-kor \
@@ -204,9 +208,17 @@ COPY --from=ner-model /model ./models/torrent-ner
 
 COPY docker/entrypoint.sh /entrypoint.sh
 # 对外端口的解析脚本：entrypoint 与下面的 HEALTHCHECK 共用同一份逻辑，
-# 保证「前端监听的口」和「健康检查探的口」永远一致（见脚本内注释）。
+# 保证「nginx 监听的口」和「健康检查探的口」永远一致（见脚本内注释）。
 COPY docker/resolve-web-port.sh /resolve-web-port.sh
 RUN chmod +x /entrypoint.sh /resolve-web-port.sh
+# nginx 前门的配置模板（entrypoint 启动时渲染端口后拉起）与启动期占位页
+COPY docker/nginx.conf.template /etc/movieclaw/nginx.conf.template
+COPY docker/starting.html /usr/share/movieclaw/starting.html
+# 构建期就校验一次渲染后的配置：模板写错不该等到用户容器起不来才发现
+RUN mkdir -p /run/movieclaw \
+    && sed -e "s|__WEB_PORT__|3000|g" -e "s|__ASSETS_DIR__|/usr/share/movieclaw|g" \
+        /etc/movieclaw/nginx.conf.template > /run/movieclaw/nginx.conf \
+    && nginx -t -c /run/movieclaw/nginx.conf
 
 # 运行时版本（依赖集合的代号，docker/runtime-version 是唯一事实源）：
 # entrypoint 据此判断 data 卷上的应用内更新 overlay 与本镜像是否兼容，
@@ -243,7 +255,8 @@ VOLUME /app/data
 # 它只是镜像元数据；bridge 部署真正决定映射的是 compose 的 ports。
 EXPOSE 3000
 
-# 穿透前端反代打后端健康接口：一次验证 Next 进程、反代链路、FastAPI 三者。
+# 走对外端口打后端健康接口：验证 nginx 前门与 FastAPI（Next 进程由 entrypoint
+# 的看门狗单独探测，它挂了容器会主动退出交给 restart 策略）。
 # 端口不能写死——用户改过端口后仍要探到实际监听的那个口，否则容器会被判成
 # unhealthy。这里与 entrypoint 共用 /resolve-web-port.sh 的解析结果。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=6m --retries=3 \

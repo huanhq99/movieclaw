@@ -301,18 +301,14 @@ class TestDeleteTorrent:
 
         await make_downloader(fake).delete_torrent(TORRENT_HASH)
 
-        assert fake.delete_calls == [
-            {"torrent_hashes": TORRENT_HASH, "delete_files": False}
-        ]
+        assert fake.delete_calls == [{"torrent_hashes": TORRENT_HASH, "delete_files": False}]
 
     async def test_delete_can_remove_downloaded_files(self):
         fake = FakeQbtClient()
 
         await make_downloader(fake).delete_torrent(TORRENT_HASH, delete_files=True)
 
-        assert fake.delete_calls == [
-            {"torrent_hashes": TORRENT_HASH, "delete_files": True}
-        ]
+        assert fake.delete_calls == [{"torrent_hashes": TORRENT_HASH, "delete_files": True}]
 
     async def test_delete_error_translated(self):
         fake = FakeQbtClient()
@@ -377,3 +373,52 @@ class TestGetTorrent:
         assert status.downloaded_bytes == 80
         assert [file.completed_bytes for file in status.files] == [100, 50, 0]
         assert [file.selected for file in status.files] == [True, True, False]
+
+
+class TestSharedClient:
+    """同一连接参数的适配器实例共享底层客户端：长连接与登录态跨实例复用。"""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_registry(self, monkeypatch):
+        from movieclaw_downloader.clients import qbittorrent as module
+
+        monkeypatch.setattr(module, "_shared_clients", {})
+        created: list[dict] = []
+
+        def fake_client(**kwargs):
+            created.append(kwargs)
+            return SimpleNamespace(kwargs=kwargs)
+
+        monkeypatch.setattr(module.qbittorrentapi, "Client", fake_client)
+        self.created = created
+
+    async def test_same_config_shares_one_client(self):
+        first = QBittorrentDownloader(CONFIG)
+        second = QBittorrentDownloader(CONFIG)
+        assert first._client() is second._client()
+        assert len(self.created) == 1
+
+    async def test_close_keeps_shared_client_alive(self):
+        first = QBittorrentDownloader(CONFIG)
+        client = first._client()
+        await first.close()
+        assert first._qbt is None
+        # 另一个实例 close 之后再来取，拿到的还是同一个已登录客户端，不会重建
+        assert QBittorrentDownloader(CONFIG)._client() is client
+        assert len(self.created) == 1
+
+    async def test_changed_credentials_replace_stale_client(self):
+        from movieclaw_downloader.clients import qbittorrent as module
+
+        QBittorrentDownloader(CONFIG)._client()
+        changed = DownloaderConfig(
+            type=DownloaderType.QBITTORRENT,
+            url=CONFIG.url,
+            username="admin",
+            password="new-pass",
+        )
+        fresh = QBittorrentDownloader(changed)._client()
+        assert fresh.kwargs["password"] == "new-pass"
+        assert len(self.created) == 2
+        # 同一 URL 只保留最新凭据的那一个条目
+        assert len(module._shared_clients) == 1

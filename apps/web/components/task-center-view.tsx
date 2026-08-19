@@ -891,6 +891,44 @@ function IngestHistoryFiles({ detail }: { detail: IngestHistoryDetail }) {
 
 /** 历史按本地日期拆成轻量 Feed，首组默认展开，避免完成卡片占满纵向空间。 */
 /**
+ * 实时速度的统一配色：上传走 --ok 绿（做种的"战果"），下载走 --info 蓝（"正在进行"），
+ * 数值加粗从灰色标签里跳出来。所有来自下载器（qB/Tr）的任务——刷流汇总、刷流单行、
+ * 普通任务的实时行——都走这一个组件，保证任务中心里 ↑/↓ 的颜色语义处处一致。
+ * glow 只给刷流汇总头部用（折叠时也要一眼可见）；speed 为 0/空时给破折号或灰字占位，
+ * 由调用方决定是否渲染占位（固定列需要占位防塌陷，自由流式行则直接不渲染）。
+ */
+function SpeedStat({
+  direction,
+  bytesPerSecond,
+  glow = false,
+  placeholder,
+  className,
+}: {
+  direction: "up" | "down";
+  bytesPerSecond: number | null | undefined;
+  glow?: boolean;
+  /** 速度为空/0 时的占位文案；不传则渲染 null */
+  placeholder?: string;
+  className?: string;
+}) {
+  const active = bytesPerSecond != null && bytesPerSecond > 0;
+  if (!active) {
+    return placeholder != null ? (
+      <span className={`tnum text-white/20 ${className ?? ""}`}>{placeholder}</span>
+    ) : null;
+  }
+  const tone =
+    direction === "up"
+      ? `text-[var(--ok)] ${glow ? "drop-shadow-[0_0_6px_rgba(74,222,128,0.45)]" : ""}`
+      : `text-[var(--info)] ${glow ? "drop-shadow-[0_0_6px_rgba(127,176,255,0.45)]" : ""}`;
+  return (
+    <span className={`tnum font-semibold ${tone} ${className ?? ""}`}>
+      {direction === "up" ? "↑" : "↓"} {formatBytes(bytesPerSecond)}/s
+    </span>
+  );
+}
+
+/**
  * 刷流做种分组：默认折叠的 <details>，头部常显最值得关心的实时汇总——
  * ↑/↓ 总速度与已上传/已下载总量；展开后逐种子一行（站点 + 名称 + 状态 +
  * 各自的速度与累计上传）。刷流种子没有媒体身份与入库流转，刻意不渲染
@@ -927,16 +965,9 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
               上传走 --ok 绿（刷流的战果就是上传量），下载走 --info 蓝，数值带淡辉光
               从灰色标签里跳出来；标签本身保持浅灰，让数字成为视觉焦点。 */}
           <span className="tnum flex flex-wrap items-center gap-x-3 text-caption text-white/45">
-            {upSpeed > 0 && (
-              <span className="font-semibold text-[var(--ok)] drop-shadow-[0_0_6px_rgba(74,222,128,0.45)]">
-                ↑ {formatBytes(upSpeed)}/s
-              </span>
-            )}
-            {downSpeed > 0 && (
-              <span className="font-semibold text-[var(--info)] drop-shadow-[0_0_6px_rgba(127,176,255,0.45)]">
-                ↓ {formatBytes(downSpeed)}/s
-              </span>
-            )}
+            {/* 上下行速度常显：为 0 时退成灰色占位，让"现在没在下载"也是一条信息 */}
+            <SpeedStat direction="up" bytesPerSecond={upSpeed} glow placeholder="↑ 0 B/s" />
+            <SpeedStat direction="down" bytesPerSecond={downSpeed} glow placeholder="↓ 0 B/s" />
             <span>
               已上传 <span className="font-semibold text-[var(--ok)]">{formatBytes(uploaded)}</span>
             </span>
@@ -969,11 +1000,6 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
 function BoostTaskRow({ task }: { task: DownloadTask }) {
   const downloading = task.state === "downloading";
   const percent = task.progress == null ? null : Math.floor(task.progress * 100);
-  const upSpeed = task.upspeed_bytes != null && task.upspeed_bytes > 0 ? task.upspeed_bytes : null;
-  const downSpeed =
-    downloading && task.dlspeed_bytes != null && task.dlspeed_bytes > 0
-      ? task.dlspeed_bytes
-      : null;
   const name = (
     <OverflowText className="min-w-0 flex-1 text-ui text-white/80">
       {task.name || task.info_hash}
@@ -1002,20 +1028,14 @@ function BoostTaskRow({ task }: { task: DownloadTask }) {
         ) : (
           name
         )}
-        {/* 下载中的刷流种子是少数，进度与下行速度跟在名称后面，不占用固定数字列 */}
+        {/* 下载中的刷流种子是少数，进度跟在名称后面；下行速度与上行并列进固定数字列 */}
         {downloading && percent != null && (
           <span className="tnum shrink-0 text-caption text-white/35">{percent}%</span>
         )}
-        {downSpeed != null && (
-          <span className="tnum shrink-0 text-caption text-[var(--info)]">
-            ↓ {formatBytes(downSpeed)}/s
-          </span>
-        )}
       </div>
-      <div className="tnum grid shrink-0 grid-cols-[5.5rem_7rem_5rem] items-center gap-x-3 text-right text-caption text-white/40 max-md:w-full max-md:grid-cols-[5.5rem_7rem_minmax(0,1fr)]">
-        <span className={upSpeed != null ? "font-semibold text-[var(--ok)]" : "text-white/20"}>
-          {upSpeed != null ? `↑ ${formatBytes(upSpeed)}/s` : "—"}
-        </span>
+      <div className="tnum grid shrink-0 grid-cols-[5.5rem_5.5rem_7rem_5rem] items-center gap-x-3 text-right text-caption text-white/40 max-md:w-full max-md:grid-cols-[5.5rem_5.5rem_7rem_minmax(0,1fr)]">
+        <SpeedStat direction="down" bytesPerSecond={task.dlspeed_bytes} placeholder="—" />
+        <SpeedStat direction="up" bytesPerSecond={task.upspeed_bytes} placeholder="—" />
         <span>
           {task.uploaded_bytes != null && task.uploaded_bytes > 0
             ? `累计 ↑${formatBytes(task.uploaded_bytes)}`
@@ -1498,8 +1518,8 @@ function DownloadTaskFeedItem({
       {/* 实时传输单独一行：下行/上行速度与剩余时间；文件尺寸已并入规格行 */}
       {(downSpeed != null || upSpeed != null || etaSeconds != null) && (
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/38">
-          {downSpeed != null && <span className="tnum">↓ {formatBytes(downSpeed)}/s</span>}
-          {upSpeed != null && <span className="tnum">↑ {formatBytes(upSpeed)}/s</span>}
+          <SpeedStat direction="down" bytesPerSecond={downSpeed} />
+          <SpeedStat direction="up" bytesPerSecond={upSpeed} />
           {etaSeconds != null && <span>剩余约 {formatDuration(etaSeconds)}</span>}
         </div>
       )}
@@ -1741,10 +1761,7 @@ function DownloadTaskCard({
                   <span aria-hidden="true" className="text-white/25">
                     ·
                   </span>
-                  <span className="tnum text-white/45">
-                    <span aria-hidden="true">↓ </span>
-                    {formatBytes(task.dlspeed_bytes)}/s
-                  </span>
+                  <SpeedStat direction="down" bytesPerSecond={task.dlspeed_bytes} />
                 </>
               )}
               {showDownloadRuntime && task.eta_seconds != null && (

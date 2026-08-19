@@ -137,12 +137,13 @@ export function SettingsPanel({ active }: SettingsPanelProps) {
     <div className="scroll-thin scroll-safe h-full overflow-y-auto">
       {/* 分区按信息密度给宽度：日志行最密（4xl）；资源站点一行要放
           名称 + 状态 + 刷流读数 + 操作，展开后还有成排统计，2xl 太挤（3xl）；
+          下载器展开后是地址/目录长值 + 路径映射对照表，同给 3xl；
           其余表单类分区维持 2xl 的舒适阅读宽度 */}
       <div
         className={`mx-auto w-full px-6 pb-20 pt-12 max-md:px-4 max-md:pb-12 max-md:pt-6 ${
           section.id === "logs"
             ? "max-w-4xl"
-            : section.id === "sites"
+            : section.id === "sites" || section.id === "downloaders"
               ? "max-w-3xl"
               : "max-w-2xl"
         }`}

@@ -6,7 +6,14 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
 import { DirectoryPicker } from "@/components/directory-picker";
 import { useConfirm } from "@/components/feedback";
-import { DownloadIcon, FolderIcon, MoreIcon, PlusIcon, XIcon } from "@/components/icons";
+import {
+  ChevronDownIcon,
+  DownloadIcon,
+  FolderIcon,
+  MoreIcon,
+  PlusIcon,
+  XIcon,
+} from "@/components/icons";
 import { useBackdrop } from "@/lib/backdrop";
 import { Modal } from "@/components/modal";
 import {
@@ -66,7 +73,9 @@ export function DownloaderConfigSection() {
   const [error, setError] = useState<string | null>(null);
   // 是否展开「添加下载器」面板
   const [adding, setAdding] = useState(false);
-  // 当前展开编辑表单的下载器 id（null 表示没有展开的编辑表单）
+  // 当前展开详情的下载器（单开手风琴，与站点列表同款交互）
+  const [expanded, setExpanded] = useState<number | null>(null);
+  // 当前亮出编辑表单的下载器 id（表单嵌在详情里；菜单「编辑配置」会先展开详情）
   const [editing, setEditing] = useState<number | null>(null);
 
   const load = useCallback(async () => {
@@ -96,6 +105,7 @@ export function DownloaderConfigSection() {
     if (!suggestMapping || loading || suggestConsumed.current || downloaders.length === 0) return;
     suggestConsumed.current = true;
     const target = downloaders.find((d) => d.is_default) ?? downloaders[0];
+    setExpanded(target.id);
     setEditing(target.id);
   }, [suggestMapping, loading, downloaders]);
 
@@ -171,9 +181,9 @@ export function DownloaderConfigSection() {
         </div>
       </div>
 
-      {/* 「添加下载器」面板 */}
+      {/* 「添加下载器」面板：与站点页的添加面板同款扁平容器 */}
       {adding && (
-        <div className="css-glass !rounded-xl p-4">
+        <div className="rounded-xl border border-white/[0.08] bg-white/[0.03] p-4">
           <DownloaderForm
             downloader={null}
             onSubmit={async (payload) => {
@@ -186,37 +196,46 @@ export function DownloaderConfigSection() {
         </div>
       )}
 
-      {/* 已配置下载器列表 */}
-      <div className="space-y-2.5">
-        {loading ? (
-          <>
-            <div className="h-[72px] animate-pulse rounded-xl bg-white/[0.04]" />
-            <div className="h-[72px] animate-pulse rounded-xl bg-white/[0.04]" />
-          </>
-        ) : downloaders.length === 0 ? (
-          <div className="css-glass flex flex-col items-center gap-3 !rounded-2xl px-6 py-12 text-center">
-            <span className="icon-chip size-12 !rounded-2xl">
-              <DownloadIcon className="size-6" />
-            </span>
-            <div>
-              <p className="text-body font-medium text-[var(--text)]">还没有接入任何下载器</p>
-              <p className="mt-1 text-sub text-[var(--text-muted)]">
-                点击右上角「添加下载器」，支持 qBittorrent 和 Transmission。
-              </p>
-            </div>
+      {/* 已配置下载器列表：扁平面板容器，行式布局 */}
+      {loading ? (
+        <div className="space-y-px overflow-hidden rounded-xl border border-white/[0.08]">
+          <div className="h-14 animate-pulse bg-white/[0.04]" />
+          <div className="h-14 animate-pulse bg-white/[0.04]" />
+        </div>
+      ) : downloaders.length === 0 ? (
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.03] px-6 py-12 text-center">
+          <span className="icon-chip size-12 !rounded-2xl">
+            <DownloadIcon className="size-6" />
+          </span>
+          <div>
+            <p className="text-body font-medium text-[var(--text)]">还没有接入任何下载器</p>
+            <p className="mt-1 text-sub text-[var(--text-muted)]">
+              点击右上角「添加下载器」，支持 qBittorrent 和 Transmission。
+            </p>
           </div>
-        ) : (
-          downloaders.map((downloader) => (
-            <DownloaderCard
+        </div>
+      ) : (
+        <div className="divide-y divide-white/[0.06] overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
+          {downloaders.map((downloader) => (
+            <DownloaderRow
               key={downloader.id}
               downloader={downloader}
               suggestMapping={suggestMapping}
               autoOpenLimits={autoLimitsId === downloader.id}
-              expanded={editing === downloader.id}
-              onToggleForm={(open) => setEditing(open ? downloader.id : null)}
+              expanded={expanded === downloader.id}
+              editing={editing === downloader.id}
+              onToggle={() =>
+                setExpanded((cur) => (cur === downloader.id ? null : downloader.id))
+              }
+              onEdit={() => {
+                setExpanded(downloader.id);
+                setEditing(downloader.id);
+              }}
+              onCloseEdit={() => setEditing((cur) => (cur === downloader.id ? null : cur))}
               onChanged={upsert}
               onDeleted={(id) => {
                 setDownloaders((prev) => prev.filter((d) => d.id !== id));
+                setExpanded((cur) => (cur === id ? null : cur));
                 setEditing((cur) => (cur === id ? null : cur));
                 // 删除默认时后端会把默认让给另一台，整体刷新拿到新归属
                 void load();
@@ -224,23 +243,30 @@ export function DownloaderConfigSection() {
               onRefresh={() => void load()}
               onError={setError}
             />
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-/* —— 单个下载器卡片：折叠态展示状态 + 操作，展开态是连接表单 —— */
+/* —— 下载器行：一行一台，P0 常驻（名称 / 默认 / 状态）；点击整行展开详情 ——
+   与站点行同构：操作全收进 ⋯ 菜单（启停 / 编辑 / 限速 / 默认 / 重测 / 删除），
+   视觉不用玻璃质感与 WebGL 开关，配置页要的是轻和稳。 */
 
-interface DownloaderCardProps {
+interface DownloaderRowProps {
   downloader: ConfiguredDownloader;
   /** 体检跳转建议预填的映射本机侧路径（无建议时为 null） */
   suggestMapping: string | null;
   /** 拥堵提示跳转（?limits=<id>）：挂载后自动打开「限速与队列」弹窗 */
   autoOpenLimits?: boolean;
   expanded: boolean;
-  onToggleForm: (open: boolean) => void;
+  /** 编辑表单是否亮出（嵌在详情里） */
+  editing: boolean;
+  onToggle: () => void;
+  /** 确保展开并亮出编辑表单（菜单「编辑配置」） */
+  onEdit: () => void;
+  onCloseEdit: () => void;
   onChanged: (downloader: ConfiguredDownloader) => void;
   onDeleted: (id: number) => void;
   /** 需要整体刷新列表的操作（如设默认会同时改动其他条目）之后调用 */
@@ -248,18 +274,20 @@ interface DownloaderCardProps {
   onError: (message: string) => void;
 }
 
-function DownloaderCard({
+function DownloaderRow({
   downloader,
   suggestMapping,
   autoOpenLimits = false,
   expanded,
-  onToggleForm,
+  editing,
+  onToggle,
+  onEdit,
+  onCloseEdit,
   onChanged,
   onDeleted,
   onRefresh,
   onError,
-}: DownloaderCardProps) {
-  const { backdrop } = useBackdrop();
+}: DownloaderRowProps) {
   const confirm = useConfirm();
   const [busy, setBusy] = useState(false);
   const [limitsOpen, setLimitsOpen] = useState(false);
@@ -268,6 +296,7 @@ function DownloaderCard({
     if (autoOpenLimits) setLimitsOpen(true);
   }, [autoOpenLimits]);
   const meta = STATUS_META[downloader.status];
+  const failed = downloader.status === "failed" && !!downloader.last_error;
 
   async function guard(fn: () => Promise<void>) {
     setBusy(true);
@@ -280,66 +309,98 @@ function DownloaderCard({
     }
   }
 
-  // 副标题：失败时给出原因，正常时展示 类型 + 版本 + 上次检查时间
-  const subtitle =
-    downloader.status === "failed" && downloader.last_error
-      ? downloader.last_error
-      : [
-          TYPE_LABEL[downloader.client_type],
-          downloader.version,
-          `上次检查 ${formatRelativeTime(downloader.last_checked_at)}`,
-        ]
-          .filter(Boolean)
-          .join(" · ");
+  // 副标题：类型 + 版本 + 上次检查时间（失败原因另起一行红字，不挤在这里）
+  const subtitle = [
+    TYPE_LABEL[downloader.client_type],
+    downloader.version,
+    downloader.last_checked_at ? `上次检查 ${formatRelativeTime(downloader.last_checked_at)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <div className="css-glass !rounded-xl">
-      <div className="flex items-center gap-3.5 p-4">
-        <span className="icon-chip size-10 !rounded-xl">
-          <DownloadIcon className="size-5" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="truncate text-body font-semibold text-[var(--text)]">{downloader.name}</p>
-            {downloader.is_default && (
-              <span className="shrink-0 rounded-full border border-white/[0.12] bg-[var(--accent-soft)] px-2 py-0.5 text-caption font-semibold text-[var(--accent)]">
-                默认
+    <div className={downloader.enabled ? "" : "opacity-60"}>
+      {/* 行主体：整行是展开热区。桌面单行；移动端错误原因折到第二行 */}
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+        className={`group flex min-h-[56px] cursor-pointer flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/25 sm:px-5 sm:py-3 ${
+          expanded ? "bg-white/[0.045]" : ""
+        }`}
+      >
+        {/* P0：图标 + 名称（可点开 WebUI）+ 默认 + 状态 */}
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="icon-chip size-9 shrink-0 !rounded-xl">
+            <DownloadIcon className="size-[18px]" />
+          </span>
+          <div className="min-w-0">
+            {/* 窄屏徽章允许折到名称下一行，别把名称挤成两个字 */}
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <a
+                href={downloader.url}
+                target="_blank"
+                rel="noreferrer"
+                title="在新窗口打开下载器 WebUI"
+                onClick={(e) => e.stopPropagation()}
+                className="truncate text-ui font-semibold text-[var(--text)] underline decoration-transparent underline-offset-4 transition-colors hover:text-white/80 hover:decoration-white/50"
+              >
+                {downloader.name}
+              </a>
+              {downloader.is_default && (
+                <span className="shrink-0 rounded-full border border-white/[0.12] bg-[var(--accent-soft)] px-2 py-0.5 text-caption font-semibold text-[var(--accent)]">
+                  默认
+                </span>
+              )}
+              <span
+                className="flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-caption font-medium"
+                style={{
+                  background: `color-mix(in oklab, ${meta.color} 12%, transparent)`,
+                  color: meta.color,
+                }}
+              >
+                <span className="size-1.5 rounded-full" style={{ background: meta.color }} />
+                {meta.label}
               </span>
-            )}
-            <span
-              className="flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-caption font-medium"
-              style={{ background: `color-mix(in oklab, ${meta.color} 12%, transparent)`, color: meta.color }}
-            >
-              <span className="size-1.5 rounded-full" style={{ background: meta.color }} />
-              {meta.label}
-            </span>
+              {!downloader.enabled && (
+                <span className="shrink-0 rounded-full bg-white/[0.08] px-2 py-0.5 text-caption font-medium text-[var(--text-muted)]">
+                  已停用
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 truncate text-caption text-[var(--text-faint)]">{subtitle}</p>
           </div>
-          <p className="mt-0.5 truncate text-caption text-[var(--text-faint)]" title={downloader.url}>
-            {subtitle}
-          </p>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
-          {/* 启用开关：与站点卡片同款受控 WebGL 液态玻璃开关 */}
-          <LiquidGlassButton
-            backgroundImage={backdrop}
-            variant="dark"
-            checked={downloader.enabled}
-            disabled={busy}
-            aria-label={downloader.enabled ? "已启用，点击停用" : "已停用，点击启用"}
-            onCheckedChange={(enabled) =>
+        {/* P1：连接失败时把原因亮出来——那一刻没有比它更重要的信息 */}
+        {failed && (
+          <p className="order-3 basis-full truncate text-caption text-[var(--danger)] sm:order-none sm:max-w-[40%] sm:basis-auto">
+            {downloader.last_error}
+          </p>
+        )}
+
+        {/* 控制区：展开箭头 + 操作菜单 */}
+        <div className="flex shrink-0 items-center gap-0.5">
+          <span className="flex size-7 items-center justify-center rounded-full text-[var(--text-faint)] transition-colors group-hover:bg-white/[0.08] group-hover:text-[var(--text-muted)]">
+            <ChevronDownIcon
+              className={`size-4 transition-transform ${expanded ? "rotate-180" : ""}`}
+            />
+          </span>
+          <DownloaderActionsMenu
+            downloader={downloader}
+            busy={busy}
+            editing={editing}
+            onSetEnabled={(enabled) =>
               void guard(async () => onChanged(await setDownloaderEnabled(downloader.id, enabled)))
             }
-            className="!min-h-0 !w-auto !gap-0 !bg-transparent !p-0"
-          >
-            <span className="sr-only">{downloader.enabled ? "已启用" : "已停用"}</span>
-          </LiquidGlassButton>
-          <DownloaderActionsMenu
-            expanded={expanded}
-            busy={busy}
-            isDefault={downloader.is_default}
-            canReverify={!IN_PROGRESS.includes(downloader.status)}
-            onEdit={() => onToggleForm(!expanded)}
+            onEdit={editing ? onCloseEdit : onEdit}
             onLimits={() => setLimitsOpen(true)}
             onSetDefault={() =>
               void guard(async () => {
@@ -371,32 +432,51 @@ function DownloaderCard({
         </div>
       </div>
 
-      {/* 连接信息带：地址、默认保存目录与路径映射，一眼可核对 */}
-      <div className="flex flex-wrap gap-x-7 gap-y-2 border-t border-white/[0.06] px-4 py-3">
-        <InfoStat label="地址" value={downloader.url} />
-        {downloader.username && <InfoStat label="用户名" value={downloader.username} />}
-        <InfoStat label="默认保存目录" value={downloader.save_path ?? "下载器默认"} />
-        {(downloader.path_mappings?.length ?? 0) > 0 && (
-          <InfoStat
-            label="路径映射"
-            value={downloader.path_mappings!.map((m) => `${m.local} → ${m.remote}`).join("；")}
-          />
-        )}
-      </div>
-
-      {/* 展开态：编辑表单 */}
+      {/* 展开详情：连接 / 保存目录 / 路径映射，以及嵌入的编辑表单 */}
       {expanded && (
-        <div className="border-t border-white/[0.06] p-4">
-          <DownloaderForm
-            downloader={downloader}
-            suggestMapping={suggestMapping}
-            onSubmit={async (payload) => {
-              onChanged(await updateDownloader(downloader.id, payload));
-              onToggleForm(false);
-            }}
-            onCancel={() => onToggleForm(false)}
-            onError={onError}
-          />
+        <div className="divide-y divide-white/[0.05] border-t border-white/[0.06] bg-white/[0.02] px-4 py-3 sm:px-5">
+          {editing ? (
+            <div className="py-1">
+              <DownloaderForm
+                downloader={downloader}
+                suggestMapping={suggestMapping}
+                onSubmit={async (payload) => {
+                  onChanged(await updateDownloader(downloader.id, payload));
+                  onCloseEdit();
+                }}
+                onCancel={onCloseEdit}
+                onError={onError}
+              />
+            </div>
+          ) : (
+            <>
+              <DetailSection label="连接">
+                <StatGrid>
+                  <DetailStat
+                    label="地址"
+                    value={downloader.url}
+                    href={downloader.url}
+                    title="在新窗口打开下载器 WebUI"
+                    wide
+                  />
+                  <DetailStat label="用户名" value={downloader.username ?? "未设置"} />
+                  <DetailStat label="版本" value={downloader.version ?? "—"} />
+                </StatGrid>
+              </DetailSection>
+              <DetailSection label="落盘">
+                <StatGrid>
+                  <DetailStat
+                    label="默认保存目录"
+                    value={downloader.save_path ?? "下载器默认"}
+                    wide
+                  />
+                </StatGrid>
+              </DetailSection>
+              <DetailSection label="映射">
+                <PathMappingTable mappings={downloader.path_mappings ?? []} />
+              </DetailSection>
+            </>
+          )}
         </div>
       )}
 
@@ -405,6 +485,107 @@ function DownloaderCard({
         downloader={downloader}
         onClose={() => setLimitsOpen(false)}
       />
+    </div>
+  );
+}
+
+/* —— 详情排版原语（与站点页同款）：段标签在桌面抽成左侧固定列，内容左缘对齐 —— */
+
+function DetailSection({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <section className="grid gap-1.5 py-3 first:pt-1 last:pb-1 sm:grid-cols-[46px_minmax(0,1fr)] sm:gap-x-4 sm:gap-y-0">
+      <p className="text-micro font-medium tracking-wide text-[var(--text-faint)] sm:pt-2">
+        {label}
+      </p>
+      <div className="min-w-0 space-y-2">{children}</div>
+    </section>
+  );
+}
+
+/** 统计区容器：等宽列，不给底色和描边，层级靠对齐与字重撑住 */
+function StatGrid({ children }: { children: React.ReactNode }) {
+  return <div className="grid grid-cols-2 gap-x-5 gap-y-3 sm:grid-cols-4">{children}</div>;
+}
+
+/**
+ * 单个信息项：淡色小标签在上、值在下。带 href 时值是可点的外链（新窗口打开）；
+ * wide 让长值（地址、目录）横跨两列，不与短值抢宽度。
+ */
+function DetailStat({
+  label,
+  value,
+  href,
+  title,
+  wide = false,
+}: {
+  label: string;
+  value: string;
+  href?: string;
+  title?: string;
+  wide?: boolean;
+}) {
+  const valueClass = "mt-0.5 block truncate text-ui font-semibold text-[var(--text)] max-sm:text-sub";
+  return (
+    <div className={`min-w-0 ${wide ? "col-span-2" : ""}`}>
+      <p className="truncate text-micro text-[var(--text-faint)]">{label}</p>
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          title={title}
+          onClick={(e) => e.stopPropagation()}
+          className={`${valueClass} underline decoration-transparent underline-offset-4 transition-colors hover:text-white/80 hover:decoration-white/50`}
+        >
+          {value}
+        </a>
+      ) : (
+        <p className={valueClass} title={value}>
+          {value}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 路径映射对照表：一条映射一行，左列是 MovieClaw 看到的路径，右列是下载器看到的
+ * 同一个位置，中间箭头表达"翻译"方向。跨容器部署时两边对同一块盘叫不同名字，
+ * 这张表就是核对"投递时路径会被翻成什么"的地方——比一行分号串好读得多。
+ */
+function PathMappingTable({ mappings }: { mappings: PathMapping[] }) {
+  if (mappings.length === 0) {
+    return (
+      <p className="pt-1.5 text-sub text-[var(--text-muted)]">
+        未配置——MovieClaw 与下载器看到的是同一套路径。
+      </p>
+    );
+  }
+  return (
+    <div className="overflow-hidden rounded-lg border border-white/[0.07]">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-3 bg-white/[0.03] px-3 py-1.5 text-micro font-medium tracking-wide text-[var(--text-faint)]">
+        <span>MovieClaw 视角</span>
+        <span aria-hidden="true" className="w-4" />
+        <span>下载器视角</span>
+      </div>
+      <ul className="divide-y divide-white/[0.05]">
+        {mappings.map((m, i) => (
+          <li
+            key={`${m.local}→${m.remote}:${i}`}
+            className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-3 px-3 py-2"
+          >
+            <code className="truncate font-mono text-sub text-[var(--text)]" title={m.local}>
+              {m.local}
+            </code>
+            <span aria-hidden="true" className="w-4 text-center text-[var(--text-faint)]">
+              →
+            </span>
+            <code className="truncate font-mono text-sub text-[var(--text)]" title={m.remote}>
+              {m.remote}
+            </code>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -676,23 +857,14 @@ function LimitInput({
   );
 }
 
-function InfoStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-micro text-[var(--text-faint)]">{label}</p>
-      <p className="mt-0.5 truncate text-ui font-semibold text-[var(--text)]">{value}</p>
-    </div>
-  );
-}
-
 /* —— 下载器操作折叠菜单（与站点卡片同款 Radix DropdownMenu） —— */
 
 interface DownloaderActionsMenuProps {
-  expanded: boolean;
+  downloader: ConfiguredDownloader;
   busy: boolean;
-  /** 已是默认时「设为默认」置灰 */
-  isDefault: boolean;
-  canReverify: boolean;
+  /** 编辑表单已亮出时菜单项变成「收起编辑」 */
+  editing: boolean;
+  onSetEnabled: (enabled: boolean) => void;
   onEdit: () => void;
   onLimits: () => void;
   onSetDefault: () => void;
@@ -701,28 +873,32 @@ interface DownloaderActionsMenuProps {
 }
 
 function DownloaderActionsMenu({
-  expanded,
+  downloader,
   busy,
-  isDefault,
-  canReverify,
+  editing,
+  onSetEnabled,
   onEdit,
   onLimits,
   onSetDefault,
   onReverify,
   onDelete,
 }: DownloaderActionsMenuProps) {
+  // Radix DropdownMenu：菜单渲染进 body Portal 并做碰撞检测；
+  // 菜单项加大内边距保证移动端触控目标
   const itemClass =
-    "glass-row nav-item cursor-pointer px-3 py-2 text-sub font-medium outline-none " +
+    "glass-row nav-item cursor-pointer px-3 py-2.5 text-sub font-medium outline-none " +
     "data-[highlighted]:!bg-[var(--glass-fill-hover)] data-[highlighted]:!text-[var(--text)] " +
     "data-[disabled]:pointer-events-none data-[disabled]:opacity-40";
+  const canReverify = !IN_PROGRESS.includes(downloader.status);
 
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
         <button
           type="button"
-          aria-label="更多操作"
-          className="glass-row !w-auto p-1.5 data-[state=open]:!bg-[var(--glass-fill-active)] data-[state=open]:!text-[var(--text)]"
+          aria-label="下载器操作"
+          onClick={(e) => e.stopPropagation()}
+          className="glass-row !w-auto p-2 data-[state=open]:!bg-[var(--glass-fill-active)] data-[state=open]:!text-[var(--text)]"
         >
           <MoreIcon className="size-4" />
         </button>
@@ -732,17 +908,25 @@ function DownloaderActionsMenu({
           align="end"
           sideOffset={6}
           collisionPadding={12}
-          className="menu-surface z-50 min-w-[9rem] !rounded-xl p-1"
+          className="menu-surface z-50 min-w-[10rem] !rounded-xl p-1"
+          onClick={(e) => e.stopPropagation()}
         >
+          <DropdownMenu.Item
+            onSelect={() => onSetEnabled(!downloader.enabled)}
+            disabled={busy}
+            className={itemClass}
+          >
+            {downloader.enabled ? "停用下载器" : "启用下载器"}
+          </DropdownMenu.Item>
           <DropdownMenu.Item onSelect={onEdit} className={itemClass}>
-            {expanded ? "收起编辑" : "编辑配置"}
+            {editing ? "收起编辑" : "编辑配置"}
           </DropdownMenu.Item>
           <DropdownMenu.Item onSelect={onLimits} disabled={busy} className={itemClass}>
             限速与队列…
           </DropdownMenu.Item>
           <DropdownMenu.Item
             onSelect={onSetDefault}
-            disabled={busy || isDefault}
+            disabled={busy || downloader.is_default}
             className={itemClass}
           >
             设为默认

@@ -4,6 +4,7 @@ export const TASK_CENTER_VIEWS = [
   "attention",
   "active",
   "history",
+  "media",
 ] as const;
 
 export type TaskCenterViewName = (typeof TASK_CENTER_VIEWS)[number];

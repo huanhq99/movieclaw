@@ -39,3 +39,95 @@ export async function listRecentWatch(limit = 20): Promise<RecentWatchItem[]> {
   );
   return response.data.items;
 }
+
+// ---------------------------------------------------------------------------
+// 任务中心「媒体库」分类（管理员运维视角）
+// ---------------------------------------------------------------------------
+
+export interface MediaActivityTarget {
+  media_item_id: number;
+  kind: MediaType;
+  title: string;
+  year: number | null;
+  poster_url: string | null;
+  season_number: number;
+  episode_number: number;
+  episode_title: string | null;
+}
+
+export interface PlaybackFileSpec {
+  resolution: string | null;
+  video_codec: string | null;
+  hdr: string | null;
+  container: string | null;
+  bit_rate: number | null;
+  size_bytes: number | null;
+}
+
+export interface ActivePlaybackSession {
+  device_id: string;
+  member_name: string;
+  client: string;
+  device_name: string;
+  client_version: string;
+  media: MediaActivityTarget;
+  position_ms: number | null;
+  duration_ms: number | null;
+  progress_percent: number | null;
+  paused: boolean;
+  /** local = 本地文件直连（速率可测）；remote = 网盘直链等不经过服务器的播放。 */
+  play_method: "local" | "remote";
+  rate_bytes_per_second: number | null;
+  bytes_sent: number | null;
+  connections: number;
+  file: PlaybackFileSpec | null;
+  started_at: string;
+  last_report_at: string;
+}
+
+export interface ActiveFileDownload {
+  device_id: string;
+  member_name: string;
+  client: string;
+  device_name: string;
+  media: MediaActivityTarget | null;
+  file_name: string;
+  size_bytes: number;
+  bytes_sent: number;
+  rate_bytes_per_second: number;
+  started_at: string;
+}
+
+export interface PlaybackDevice {
+  device_id: string;
+  device_name: string;
+  client: string;
+  client_version: string;
+  member_name: string;
+  last_seen_at: string | null;
+  online: boolean;
+}
+
+export interface MediaRecentPlay {
+  member_name: string;
+  media: MediaActivityTarget;
+  position_ms: number;
+  duration_ms: number | null;
+  progress_percent: number | null;
+  played: boolean;
+  play_count: number;
+  last_played_at: string;
+}
+
+export interface MediaActivitySnapshot {
+  sessions: ActivePlaybackSession[];
+  downloads: ActiveFileDownload[];
+  devices: PlaybackDevice[];
+  recent: MediaRecentPlay[];
+}
+
+/** 任务中心媒体库分类的完整快照：正在播放/下载、设备清单与全成员最近观看。 */
+export async function fetchMediaActivity(): Promise<MediaActivitySnapshot> {
+  const response = await request<ApiEnvelope<MediaActivitySnapshot>>("/playback/activity");
+  return response.data;
+}

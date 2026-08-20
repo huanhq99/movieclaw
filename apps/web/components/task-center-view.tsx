@@ -22,6 +22,11 @@ import {
   TvIcon,
   XIcon,
 } from "@/components/icons";
+import {
+  MediaActivityPanel,
+  MediaActivitySummaryNav,
+  useMediaActivity,
+} from "@/components/media-activity-section";
 import { Modal } from "@/components/modal";
 import { OverflowText } from "@/components/overflow-text";
 import { PosterImage } from "@/components/poster-image";
@@ -71,6 +76,7 @@ const VIEW_LABELS: { id: TaskCenterViewName; label: string }[] = [
   { id: "active", label: "进行中" },
   { id: "attention", label: "需要处理" },
   { id: "history", label: "已结束" },
+  { id: "media", label: "媒体库" },
 ];
 
 /**
@@ -99,6 +105,8 @@ export function TaskCenterView({
     refreshedAt,
     refresh,
   } = useDownloadTasks();
+  // 媒体库活动只在需要它的视图轮询：明细视图 + 「全部」的汇总导航
+  const mediaActivity = useMediaActivity(view === "media" || view === "all");
 
   async function removeDownloadTask(task: DownloadTask, deleteFiles: boolean) {
     if (task.downloader_id == null || deletingTaskId != null) return;
@@ -238,10 +246,13 @@ export function TaskCenterView({
     (showActive && boostTasks.length > 0 ? 1 : 0) +
     (showHistory ? standaloneHistoricalJobs.length : 0);
   const failedSources = sources.filter((source) => source.status !== "active");
+  const liveMediaCount =
+    mediaActivity.snapshot.sessions.length + mediaActivity.snapshot.downloads.length;
   const viewCounts: Partial<Record<TaskCenterViewName, number>> = {
     attention: attentionTotal,
     active: activeTotal,
     history: standaloneHistoricalJobs.length,
+    media: liveMediaCount,
   };
 
   return (
@@ -299,6 +310,17 @@ export function TaskCenterView({
                 : "等待刷新"}
           </p>
         </div>
+
+        {/* 「全部」保持任务处置语义：媒体库活动只投影为一条汇总导航，
+            明细（会话、设备、观看历史）全部由媒体库视图承载 */}
+        {view === "all" && (
+          <MediaActivitySummaryNav
+            snapshot={mediaActivity.snapshot}
+            onOpen={() => setView("media")}
+          />
+        )}
+
+        {view === "media" && <MediaActivityPanel {...mediaActivity} />}
 
         {showAttention && attentionTotal > 0 && (
           <TaskAttentionSection count={attentionTotal}>
@@ -365,9 +387,9 @@ export function TaskCenterView({
           />
         )}
 
-        {visibleCount === 0 && !loading && <EmptyView view={view} />}
+        {view !== "media" && visibleCount === 0 && !loading && <EmptyView view={view} />}
 
-        {loading && visibleCount === 0 && (
+        {view !== "media" && loading && visibleCount === 0 && (
           <div className="flex items-center justify-center gap-2.5 py-20 text-ui text-[var(--text-muted)]">
             <span className="size-4 animate-spin rounded-full border-2 border-white/20 border-t-white/70" />
             正在汇总任务…
@@ -2320,6 +2342,8 @@ function EmptyView({ view }: { view: TaskCenterViewName }) {
     attention: { title: "当前无需处理", note: "异常或需要确认的任务会优先出现在这里。" },
     active: { title: "当前没有进行中的任务", note: "新任务启动后会自动进入实时过程。" },
     history: { title: "还没有历史记录", note: "完成和取消的后台作业会保留在这里。" },
+    // 媒体库视图有自己的分区空态，不走这里；键仅为类型完整
+    media: { title: "当前没有播放活动", note: "设备开始播放后会自动出现在这里。" },
   };
   return (
     <div className="mt-8 rounded-2xl border border-white/[0.07] bg-black/20 px-6 py-16 text-center backdrop-blur-xl">

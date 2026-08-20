@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { Route } from "next";
 import { usePathname, useRouter } from "next/navigation";
@@ -8,7 +8,9 @@ import { usePathname, useRouter } from "next/navigation";
 import { ClockIcon } from "@/components/icons";
 import { MediaActivityPanel, useMediaActivity } from "@/components/media-activity-section";
 import { TaskCenterView } from "@/components/task-center-view";
+import { usePageChrome } from "@/lib/page-chrome";
 import type { ActivityScope, TaskCenterViewName } from "@/lib/task-center";
+import { useIsMobile } from "@/lib/use-media-query";
 
 /**
  * 活动页：一级按**领域**分「观看 / 任务」，二级才是任务自己的状态切片。
@@ -64,10 +66,26 @@ export function ActivityView({
   const liveCount =
     mediaActivity.snapshot.sessions.length + mediaActivity.snapshot.downloads.length;
 
+  const switcher = useMemo(
+    () => <ScopeSwitcher value={scope} liveCount={liveCount} onChange={switchScope} />,
+    [liveCount, scope, switchScope],
+  );
+
+  // 活动页与发现页同为侧栏一级入口、没有 PageNav：视角切换若在窄屏自己占一行，
+  // 会和全局顶栏摞成两排 header。移动端沿用发现页的做法挂进全局顶栏那一行
+  // （字标与搜索之间本来就空着），桌面端维持页头右上角。
+  const chrome = usePageChrome();
+  const isMobile = useIsMobile();
+  const setTopBarActions = chrome?.setTopBarActions;
+  useEffect(() => {
+    if (!isMobile || !setTopBarActions) return;
+    return setTopBarActions(switcher);
+  }, [isMobile, setTopBarActions, switcher]);
+
   return (
     <div className="scroll-thin scroll-safe h-full overflow-y-auto pb-10">
       <div className="mx-auto w-full max-w-[1180px] px-6 pt-7 max-md:px-4 max-md:pt-4">
-        <header className="flex items-start justify-between gap-4 max-md:flex-col max-md:gap-3">
+        <header className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2.5">
               <ClockIcon className="size-6 text-[var(--info)]" />
@@ -81,7 +99,7 @@ export function ActivityView({
                 : "观察下载、入库和后台作业的完整过程，需要处理的任务会优先出现。"}
             </p>
           </div>
-          <ScopeSwitcher value={scope} liveCount={liveCount} onChange={switchScope} />
+          {!isMobile && switcher}
         </header>
 
         {scope === "media" ? (
@@ -105,14 +123,14 @@ function ScopeSwitcher({
   onChange: (scope: ActivityScope) => void;
 }) {
   return (
-    <div className="flex shrink-0 rounded-full border border-white/10 bg-black/35 p-1 backdrop-blur-xl max-md:w-full">
+    <div className="flex shrink-0 rounded-full border border-white/10 bg-black/35 p-1 backdrop-blur-xl">
       {(["media", "tasks"] as const).map((scope) => (
         <button
           key={scope}
           type="button"
           aria-pressed={value === scope}
           onClick={() => onChange(scope)}
-          className={`flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-sub font-semibold transition max-md:flex-1 ${
+          className={`flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-sub font-semibold transition max-md:px-3.5 ${
             value === scope
               ? "bg-white/15 text-white shadow-sm"
               : "text-[var(--text-muted)] hover:text-white"

@@ -5,7 +5,12 @@
  * 避免各站点原始文本（"1.5 TB" / "1536GB"）格式不一。
  */
 
-/** 字节数 → 可读体积，如「1.50 TB」「800 GB」。0 也是有效值（显示 0 B）。 */
+/**
+ * 字节数 → 可读体积，如「1.50 TB」「800 GB」。0 也是有效值（显示 0 B）。
+ * 百位起省掉小数，保证数字部分最多 5 个字符（"99.99"），调用方的定宽数字列
+ * 按这个上限留宽度。判断档位前先按 2 位四舍五入，否则 99.997 会被格成
+ * "100.00"——多出一个字符，正好把窄屏的定宽列撑破。
+ */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
@@ -15,7 +20,8 @@ export function formatBytes(bytes: number): string {
     value /= 1024;
     i += 1;
   }
-  return `${value.toFixed(value >= 100 || i === 0 ? 0 : 2)} ${units[i]}`;
+  const rounded = Number(value.toFixed(2));
+  return `${rounded.toFixed(rounded >= 100 || i === 0 ? 0 : 2)} ${units[i]}`;
 }
 
 /**

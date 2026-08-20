@@ -208,6 +208,9 @@ async def test_download_connections_aggregate_per_file(client: TestClient) -> No
     assert download["connections"] == 3
     assert download["bytes_sent"] == 3_000
     assert download["media"]["title"] == "黑客帝国"
+    # 三条连接都从 0 开始，最远位置就是单条已传量；20_000 字节的 5%
+    assert download["position_bytes"] == 1_000
+    assert download["progress_percent"] == 5
 
 
 async def test_strm_session_reports_remote_play_method(client: TestClient) -> None:
@@ -244,3 +247,39 @@ async def test_strm_session_reports_remote_play_method(client: TestClient) -> No
     assert len(data["sessions"]) == 1
     assert data["sessions"][0]["play_method"] == "remote"
     assert data["sessions"][0]["rate_bytes_per_second"] is None
+
+
+async def test_download_progress_counts_resume_offset(client: TestClient) -> None:
+    """断点续传：进度从 Range 起点续算，不把已下好的部分算回 0。"""
+    async with get_database().session() as session:
+        movie = MediaItem(
+            kind="movie",
+            tmdb_id=49026,
+            title="蝙蝠侠：黑暗骑士崛起",
+            original_title="The Dark Knight Rises",
+            year=2012,
+            aliases=[],
+        )
+        session.add(movie)
+        await session.commit()
+        movie_id = movie.id
+
+    info = ClientInfo(name="Infuse", device_name="Apple TV", device_id="dev-7", version="8.0")
+    meter = activity.register_stream(
+        device_id="dev-7",
+        kind=activity.STREAM_KIND_DOWNLOAD,
+        member_id=0,
+        unit=(movie_id, 0, 0),
+        file_id=3,
+        file_name="tdkr.mkv",
+        size_bytes=10_000,
+        client=info,
+        start_offset=8_000,
+    )
+    meter.add(1_000)
+
+    download = client.get("/api/v1/playback/activity").json()["data"]["downloads"][0]
+    assert download["position_bytes"] == 9_000
+    assert download["progress_percent"] == 90
+    # 本次连接只传了 1000 字节，与"下载到哪"是两个读数
+    assert download["bytes_sent"] == 1_000

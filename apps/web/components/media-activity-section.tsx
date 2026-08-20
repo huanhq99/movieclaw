@@ -231,22 +231,29 @@ function ActivityTitle({ media }: { media: MediaActivityTarget }) {
   );
 }
 
+/**
+ * 状态徽标。窄屏收敛为单个彩色圆点（与任务中心既有约定一致，
+ * docs/design/task-center.md：状态在移动端压缩为一个彩色圆点）——
+ * 文字降为 sr-only 而不是从 DOM 摘除，读屏用户仍能听到状态。
+ */
 function StatusBadge({ paused }: { paused: boolean }) {
-  if (paused) {
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-white/[0.08] px-2 py-0.5 text-caption font-semibold text-white/55">
-        <span className="size-1.5 rounded-full bg-white/40" aria-hidden="true" />
-        已暂停
-      </span>
-    );
-  }
+  const tone = paused
+    ? { pill: "bg-white/[0.08] text-white/55", dot: "bg-white/40" }
+    : { pill: "bg-[var(--ok)]/12 text-[var(--ok)]", dot: "bg-[var(--ok)]" };
   return (
-    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--ok)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--ok)]">
-      <span className="relative flex size-1.5" aria-hidden="true">
-        <span className="absolute inline-flex size-1.5 motion-safe:animate-ping rounded-full bg-[var(--ok)]/60" />
-        <span className="relative inline-flex size-1.5 rounded-full bg-[var(--ok)]" />
+    <span
+      title={paused ? "已暂停" : "播放中"}
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-caption font-semibold max-md:bg-transparent max-md:p-0 ${tone.pill}`}
+    >
+      <span className="relative flex size-1.5 max-md:size-2" aria-hidden="true">
+        {!paused && (
+          <span
+            className={`absolute inline-flex size-1.5 motion-safe:animate-ping rounded-full max-md:size-2 ${tone.dot} opacity-60`}
+          />
+        )}
+        <span className={`relative inline-flex size-1.5 rounded-full max-md:size-2 ${tone.dot}`} />
       </span>
-      播放中
+      <span className="max-md:sr-only">{paused ? "已暂停" : "播放中"}</span>
     </span>
   );
 }
@@ -262,7 +269,7 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
     session.file?.size_bytes ? formatBytes(session.file.size_bytes) : null,
   ].filter(Boolean) as string[];
   return (
-    <ActivityCard>
+    <ActivityCard percent={percent} muted={session.paused}>
       <ActivityPoster media={media} className="h-24 w-16 max-md:h-[76px] max-md:w-[52px]" />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-start justify-between gap-2.5">
@@ -299,75 +306,87 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
             <span className="text-white/35 max-md:hidden">{specParts.join(" · ")}</span>
           )}
         </div>
-        <ProgressLine
+        <ClockLine
           percent={percent}
           positionMs={session.position_ms}
           durationMs={session.duration_ms}
-          muted={session.paused}
         />
       </div>
     </ActivityCard>
   );
 }
 
-/** 会话/下载共用的卡片外壳：高度由海报决定，右栏纵向铺满。 */
-function ActivityCard({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex gap-3.5 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-3.5 max-md:gap-3 max-md:p-3">
-      {children}
-    </div>
-  );
-}
-
 /**
- * 进度条与时刻同处一行：宽屏下进度条不再横跨整卡、时间与百分比也不再分居
- * 两端隔着大片空白，眼睛一次就能把「进度 / 位置 / 百分比」对上。
+ * 会话/下载共用的卡片外壳：高度由海报决定，进度条贴卡片底边横跨全宽。
+ *
+ * 贴底全宽细条是媒体服务端的通行形态（Jellyfin 控制台、Plex 活动、
+ * Netflix 缩略图）：多张卡片的进度共享同一条基线，可以互相比较；进度条
+ * 只当视觉指示器，具体时刻与百分比放在文字区，不被拉到卡片另一端。
  */
-function ProgressLine({
+function ActivityCard({
+  children,
   percent,
-  positionMs,
-  durationMs,
-  muted,
+  muted = false,
 }: {
-  percent: number | null;
-  positionMs: number | null;
-  durationMs: number | null;
-  muted: boolean;
+  children: React.ReactNode;
+  percent?: number | null;
+  muted?: boolean;
 }) {
-  if (percent == null && positionMs == null) return null;
   return (
-    <div className="mt-auto flex items-center gap-2.5 pt-1.5">
+    <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03]">
+      <div className="flex gap-3.5 p-3.5 pb-4 max-md:gap-3 max-md:p-3 max-md:pb-3.5">
+        {children}
+      </div>
       {percent != null && (
-        // 限宽：宽屏下无限拉伸会把进度条抻成一条分割线，并把时刻推到视野另一端
-        <div className="h-1 w-full min-w-8 max-w-[220px] overflow-hidden rounded-full bg-white/[0.07]">
+        <div className="absolute inset-x-0 bottom-0 h-[3px] bg-white/[0.06]">
           <div
-            className="h-full rounded-full transition-[width] duration-700"
+            className="h-full transition-[width] duration-700"
             style={{
               width: `${Math.min(100, Math.max(1, percent))}%`,
-              backgroundColor: muted ? "rgba(255,255,255,0.28)" : "var(--info)",
+              backgroundColor: muted ? "rgba(255,255,255,0.3)" : "var(--info)",
             }}
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/** 时刻行：位置 / 总时长 · 百分比。进度的图形部分由卡片底边的条承担。 */
+function ClockLine({
+  percent,
+  positionMs,
+  durationMs,
+}: {
+  percent: number | null;
+  positionMs: number | null;
+  durationMs: number | null;
+}) {
+  if (positionMs == null && percent == null) return null;
+  return (
+    <p className="tnum mt-auto pt-1 text-caption text-white/45">
       {positionMs != null && (
-        <span className="tnum shrink-0 text-caption text-white/45">
+        <>
           {formatPlayClock(positionMs)}
           {durationMs != null && (
             <span className="text-white/25"> / {formatPlayClock(durationMs)}</span>
           )}
-        </span>
+        </>
       )}
       {percent != null && (
-        <span className="tnum shrink-0 text-caption font-medium text-white/55">{percent}%</span>
+        <>
+          {positionMs != null && <span className="mx-1.5 text-white/20">·</span>}
+          <span className="font-medium text-white/60">{percent}%</span>
+        </>
       )}
-    </div>
+    </p>
   );
 }
 
 function DownloadCard({ download }: { download: ActiveFileDownload }) {
   const media = download.media;
   return (
-    <ActivityCard>
+    <ActivityCard percent={download.progress_percent}>
       <ActivityPoster media={media} className="h-24 w-16 max-md:h-[76px] max-md:w-[52px]" />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-start justify-between gap-2.5">
@@ -378,9 +397,12 @@ function DownloadCard({ download }: { download: ActiveFileDownload }) {
               {download.file_name}
             </OverflowText>
           )}
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)]">
-            <DownloadIcon className="size-3" />
-            文件下载
+          <span
+            title="文件下载"
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)] max-md:bg-transparent max-md:p-0"
+          >
+            <DownloadIcon className="size-3 max-md:size-3.5" />
+            <span className="max-md:sr-only">文件下载</span>
           </span>
         </div>
         <MetaLine
@@ -393,15 +415,20 @@ function DownloadCard({ download }: { download: ActiveFileDownload }) {
             </span>
           )}
           <span className="tnum">
-            本次已传 {formatBytes(download.bytes_sent)}
+            {formatBytes(download.position_bytes)}
             {download.size_bytes > 0 && (
               <span className="text-white/25"> / {formatBytes(download.size_bytes)}</span>
+            )}
+            {download.progress_percent != null && (
+              <span className="ml-1.5 font-medium text-white/60">
+                {download.progress_percent}%
+              </span>
             )}
           </span>
           {download.connections > 1 && <span>{download.connections} 条连接</span>}
         </div>
         {media && (
-          <OverflowText lines={1} className="mt-auto pt-1.5 text-caption text-white/30">
+          <OverflowText lines={1} className="mt-auto pt-1 text-caption text-white/30">
             {download.file_name}
           </OverflowText>
         )}

@@ -163,6 +163,23 @@ async def playback_info(
     )
 
 
+def _range_start(request: Request) -> int:
+    """请求 Range 的起始字节；无 Range 或形态不认识按 0（从头开始）。
+
+    只取起点：整文件下载据此还原真实下载位置（断点续传从中间开始，
+    只看本次已传字节会把进度算回 0）。后缀式 ``bytes=-N`` 表达"最后 N 字节"，
+    起点依赖文件长度，这里不做推断，按 0 处理（进度退化为保守读数）。
+    """
+    raw = (request.headers.get("Range") or "").strip().lower()
+    if not raw.startswith("bytes="):
+        return 0
+    first = raw[len("bytes=") :].split(",")[0].strip()
+    start = first.split("-")[0].strip()
+    if not start.isdigit():
+        return 0
+    return int(start)
+
+
 def _stream_unit(ref: EntityRef) -> playback_state.Unit:
     """取流目标的播放单元（与 playstate._leaf_unit 同口径：电影 (0,0) 哨兵）。"""
     if ref.kind == EntityKind.EPISODE:
@@ -357,6 +374,7 @@ async def download_item(
         file_name=path.name,
         size_bytes=f.size_bytes,
         client=_identity_client(identity),
+        start_offset=_range_start(request),
     )
     return DisconnectAwareFileResponse(
         path,

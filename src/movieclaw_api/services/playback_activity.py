@@ -328,6 +328,11 @@ async def media_activity_overview(
     ):
         first = group[0]
         ctx = contexts.get(first.unit)
+        # 下载进度取"推进得最远的那条连接"：顺序下载（播放器离线缓存的常态，
+        # 含断点续传）下这就是真实位置。并发分段下载会偏乐观，但那类客户端
+        # 不是本接口的服务对象，不为它把读数复杂化。
+        position = max(m.position_bytes for m in group)
+        size = first.size_bytes
         download_views.append(
             ActiveFileDownloadView(
                 device_id=first.device_id,
@@ -336,10 +341,14 @@ async def media_activity_overview(
                 device_name=first.client.device_name,
                 media=_target(first.unit, ctx) if ctx else None,
                 file_name=first.file_name,
-                size_bytes=first.size_bytes,
+                size_bytes=size,
                 bytes_sent=sum(m.bytes_sent for m in group),
                 rate_bytes_per_second=sum(m.rate_bytes_per_second() for m in group),
                 connections=len(group),
+                position_bytes=position,
+                progress_percent=(
+                    max(1, min(100, round(position * 100 / size))) if size > 0 else None
+                ),
                 started_at=min(m.started_at for m in group),
             )
         )

@@ -52,6 +52,9 @@ class StreamMeter:
     file_name: str
     size_bytes: int
     client: ClientInfo
+    #: 本条连接的 Range 起点。整文件下载据此还原"下载到文件哪个位置"——
+    #: 断点续传从中间开始，只看 bytes_sent 会把进度算回 0。
+    start_offset: int = 0
     started_at: datetime = field(default_factory=utcnow)
     bytes_sent: int = 0
     _samples: deque = field(default_factory=deque)  # [(monotonic, 字节数)]
@@ -67,6 +70,11 @@ class StreamMeter:
     def _prune(self, now: float) -> None:
         while self._samples and now - self._samples[0][0] > _RATE_WINDOW_SECONDS:
             self._samples.popleft()
+
+    @property
+    def position_bytes(self) -> int:
+        """本条连接已推进到文件的哪个字节位置（Range 起点 + 本次已传）。"""
+        return self.start_offset + self.bytes_sent
 
     def rate_bytes_per_second(self, now: float | None = None) -> float:
         """滑动窗口内的平均传输速率（字节/秒）；窗口内无流量为 0。"""
@@ -168,6 +176,7 @@ def register_stream(
     file_name: str,
     size_bytes: int,
     client: ClientInfo,
+    start_offset: int = 0,
 ) -> StreamMeter:
     """登记一条开始服务的字节流并返回其计量器。
 
@@ -183,6 +192,7 @@ def register_stream(
         file_name=file_name,
         size_bytes=size_bytes,
         client=client,
+        start_offset=start_offset,
     )
     _meters.append(meter)
     if kind == STREAM_KIND_PLAY:

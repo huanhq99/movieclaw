@@ -99,6 +99,10 @@ export interface ActiveFileDownload {
   rate_bytes_per_second: number;
   /** 同一设备同一文件的多条 Range 连接（断点续传）聚合后的连接数。 */
   connections: number;
+  /** 已下载到文件的哪个字节位置（Range 起点 + 本次已传）。 */
+  position_bytes: number;
+  /** 由位置换算的完成百分比；文件大小未知时为 null。 */
+  progress_percent: number | null;
   started_at: string;
 }
 

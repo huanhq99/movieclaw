@@ -107,6 +107,10 @@ class ActiveFileDownloadView(BaseModel):
     rate_bytes_per_second: float
     # 同一设备对同一文件的多条 Range 连接（断点续传）聚合为一条展示
     connections: int
+    # 已下载到文件的哪个位置（Range 起点 + 本次已传），以及据此换算的百分比。
+    # 文件大小未知时为 None，界面不画进度条而不是画一条假的。
+    position_bytes: int
+    progress_percent: int | None
     started_at: datetime
 
 

@@ -36,7 +36,6 @@
     ".next-check/types/**/*.ts",
     ".next-dockercheck/types/**/*.ts",
     ".next-extinstall/types/**/*.ts",
-    ".next-herobtn/types/**/*.ts",
     ".next-importbadge/types/**/*.ts",
     ".next-mapcopy/types/**/*.ts",
     ".next-mobilechrome/types/**/*.ts",
@@ -73,7 +72,7 @@
     ".next-wishbtn/types/**/*.ts",
     ".next/types/**/*.ts",
     "next-env.d.ts",
-    ".next-demo/types/**/*.ts"
+    ".next-herobtn/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

@@ -10,18 +10,20 @@ import {
   ChevronRightIcon,
   DownloadIcon,
   PlayIcon,
-  ServerIcon,
 } from "@/components/icons";
+import { useToast } from "@/components/feedback";
+import { TaskActionsMenu } from "@/components/job-center";
+import { Modal } from "@/components/modal";
 import { OverflowText } from "@/components/overflow-text";
 import { PosterImage } from "@/components/poster-image";
 import {
   fetchMediaActivity,
+  revokePlaybackDevice,
   type ActiveFileDownload,
   type ActivePlaybackSession,
   type MediaActivitySnapshot,
   type MediaActivityTarget,
   type MediaRecentPlay,
-  type PlaybackDevice,
 } from "@/lib/api/playback";
 import { formatBytes } from "@/lib/format";
 import { imageUrl } from "@/lib/image-proxy";
@@ -42,6 +44,8 @@ export interface MediaActivityState {
   snapshot: MediaActivitySnapshot;
   loading: boolean;
   error: string | null;
+  /** 立即重新拉取一次（注销设备等写操作后校准，不等下一个轮询周期）。 */
+  refresh: () => void;
 }
 
 /**
@@ -75,7 +79,7 @@ export function useMediaActivity(enabled: boolean): MediaActivityState {
   }, [enabled]);
 
   useVisiblePolling(refresh, enabled ? POLL_INTERVAL_MS : null, { leading: true });
-  return { snapshot, loading, error };
+  return { snapshot, loading, error, refresh };
 }
 
 function formatRate(bytesPerSecond: number): string {
@@ -236,6 +240,40 @@ function ActivityTitle({ media }: { media: MediaActivityTarget }) {
  * docs/design/activity.md：状态在移动端压缩为一个彩色圆点）——
  * 文字降为 sr-only 而不是从 DOM 摘除，读屏用户仍能听到状态。
  */
+/**
+ * 设备操作菜单。播放/下载卡的右上角，与任务中心卡片同一形态（TaskActionsMenu）。
+ *
+ * 只提供「注销此设备」：这是本页能对一台设备安全表达的唯一动作——删凭据、
+ * 断会话、停取流。暂停/快进这类远程控制需要播放器侧的会话控制通道，
+ * Jellyfin 兼容层没有实现，不做假按钮。
+ */
+function DeviceActionsMenu({
+  deviceId,
+  deviceLabel: label,
+  onRevoke,
+  busy,
+}: {
+  deviceId: string;
+  deviceLabel: string;
+  onRevoke: (deviceId: string, label: string) => void;
+  busy: boolean;
+}) {
+  return (
+    <TaskActionsMenu
+      ariaLabel={`「${label}」的设备操作`}
+      disabled={busy}
+      items={[
+        {
+          id: "revoke",
+          label: "注销此设备",
+          tone: "danger",
+          onSelect: () => onRevoke(deviceId, label),
+        },
+      ]}
+    />
+  );
+}
+
 function StatusBadge({ paused }: { paused: boolean }) {
   const tone = paused
     ? { pill: "bg-white/[0.08] text-white/55", dot: "bg-white/40" }
@@ -258,7 +296,15 @@ function StatusBadge({ paused }: { paused: boolean }) {
   );
 }
 
-function SessionCard({ session }: { session: ActivePlaybackSession }) {
+function SessionCard({
+  session,
+  onRevoke,
+  busy,
+}: {
+  session: ActivePlaybackSession;
+  onRevoke: (deviceId: string, label: string) => void;
+  busy: boolean;
+}) {
   const media = session.media;
   const percent = session.progress_percent;
   const specParts = [
@@ -274,7 +320,15 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-start justify-between gap-2.5">
           <ActivityTitle media={media} />
-          <StatusBadge paused={session.paused} />
+          <div className="flex shrink-0 items-center gap-1.5">
+            <StatusBadge paused={session.paused} />
+            <DeviceActionsMenu
+              deviceId={session.device_id}
+              deviceLabel={deviceLabel(session.client, session.device_name)}
+              onRevoke={onRevoke}
+              busy={busy}
+            />
+          </div>
         </div>
         <MetaLine
           parts={[
@@ -383,7 +437,15 @@ function ClockLine({
   );
 }
 
-function DownloadCard({ download }: { download: ActiveFileDownload }) {
+function DownloadCard({
+  download,
+  onRevoke,
+  busy,
+}: {
+  download: ActiveFileDownload;
+  onRevoke: (deviceId: string, label: string) => void;
+  busy: boolean;
+}) {
   const media = download.media;
   return (
     <ActivityCard percent={download.progress_percent}>
@@ -397,13 +459,21 @@ function DownloadCard({ download }: { download: ActiveFileDownload }) {
               {download.file_name}
             </OverflowText>
           )}
-          <span
-            title="文件下载"
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)] max-md:bg-transparent max-md:p-0"
-          >
-            <DownloadIcon className="size-3 max-md:size-3.5" />
-            <span className="max-md:sr-only">文件下载</span>
-          </span>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span
+              title="文件下载"
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)] max-md:bg-transparent max-md:p-0"
+            >
+              <DownloadIcon className="size-3 max-md:size-3.5" />
+              <span className="max-md:sr-only">文件下载</span>
+            </span>
+            <DeviceActionsMenu
+              deviceId={download.device_id}
+              deviceLabel={deviceLabel(download.client, download.device_name)}
+              onRevoke={onRevoke}
+              busy={busy}
+            />
+          </div>
         </div>
         <MetaLine
           parts={[download.member_name, deviceLabel(download.client, download.device_name)]}
@@ -434,49 +504,6 @@ function DownloadCard({ download }: { download: ActiveFileDownload }) {
         )}
       </div>
     </ActivityCard>
-  );
-}
-
-function DeviceRow({ device }: { device: PlaybackDevice }) {
-  return (
-    <div className="flex items-center gap-3 px-4 py-3 max-md:px-3.5">
-      <span className="relative flex size-2 shrink-0" aria-hidden="true">
-        {device.online && (
-          <span className="absolute inline-flex size-2 motion-safe:animate-ping rounded-full bg-[var(--ok)]/50" />
-        )}
-        <span
-          className={`relative inline-flex size-2 rounded-full ${
-            device.online ? "bg-[var(--ok)]" : "bg-white/20"
-          }`}
-        />
-      </span>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-ui text-white/85">
-          {device.device_name || device.client || device.device_id}
-        </p>
-        <MetaLine
-          className="mt-0.5"
-          parts={[
-            // 设备名缺席时客户端已经当了主标题，副行不再重复一遍
-            device.device_name
-              ? [device.client, device.client_version].filter(Boolean).join(" ")
-              : null,
-            device.member_name,
-          ]}
-        />
-      </div>
-      <span
-        className={`shrink-0 text-caption ${
-          device.online ? "font-medium text-[var(--ok)]" : "text-white/35"
-        }`}
-      >
-        {device.online
-          ? "正在活动"
-          : device.last_seen_at
-            ? formatRelativeTime(device.last_seen_at)
-            : "从未使用"}
-      </span>
-    </div>
   );
 }
 
@@ -528,10 +555,35 @@ function SectionHeading({
  * 「观看」视角主体：正在播放（含整文件下载）→ 设备 → 最近观看。
  * 实时段来自内存快照（服务重启即清空），历史段来自 playback_state 领域表。
  */
-export function MediaActivityPanel({ snapshot, loading, error }: MediaActivityState) {
+export function MediaActivityPanel({
+  snapshot,
+  loading,
+  error,
+  refresh,
+}: MediaActivityState) {
+  const toast = useToast();
+  const [pendingRevoke, setPendingRevoke] = useState<RevokeTarget | null>(null);
+  const [revoking, setRevoking] = useState<string | null>(null);
   const liveCount = snapshot.sessions.length + snapshot.downloads.length;
-  const empty =
-    liveCount === 0 && snapshot.devices.length === 0 && snapshot.recent.length === 0;
+  const empty = liveCount === 0 && snapshot.recent.length === 0;
+
+  const requestRevoke = useCallback((deviceId: string, label: string) => {
+    setPendingRevoke({ deviceId, label });
+  }, []);
+
+  async function confirmRevoke(target: RevokeTarget) {
+    if (revoking != null) return;
+    setRevoking(target.deviceId);
+    try {
+      toast.success(await revokePlaybackDevice(target.deviceId));
+      setPendingRevoke(null);
+      refresh();
+    } catch (caught) {
+      toast.error((caught as Error).message || "注销设备失败");
+    } finally {
+      setRevoking(null);
+    }
+  }
 
   if (loading && empty) {
     return (
@@ -565,32 +617,21 @@ export function MediaActivityPanel({ snapshot, loading, error }: MediaActivitySt
               <SessionCard
                 key={`${session.device_id}-${session.media.media_item_id}-${session.media.season_number}-${session.media.episode_number}`}
                 session={session}
+                onRevoke={requestRevoke}
+                busy={revoking != null}
               />
             ))}
             {snapshot.downloads.map((download) => (
               <DownloadCard
                 key={`${download.device_id}-${download.file_name}`}
                 download={download}
+                onRevoke={requestRevoke}
+                busy={revoking != null}
               />
             ))}
           </div>
         )}
       </section>
-
-      {snapshot.devices.length > 0 && (
-        <section className="mt-7" aria-label="播放器设备">
-          <SectionHeading
-            icon={<ServerIcon className="size-4 text-white/40" />}
-            title="设备"
-            count={snapshot.devices.length}
-          />
-          <div className="divide-y divide-white/[0.06] rounded-2xl border border-white/[0.08] bg-white/[0.02]">
-            {snapshot.devices.map((device) => (
-              <DeviceRow key={device.device_id} device={device} />
-            ))}
-          </div>
-        </section>
-      )}
 
       {snapshot.recent.length > 0 && (
         <section className="mt-7" aria-label="最近观看">
@@ -609,6 +650,68 @@ export function MediaActivityPanel({ snapshot, loading, error }: MediaActivitySt
           </div>
         </section>
       )}
+
+      {pendingRevoke && (
+        <RevokeDeviceDialog
+          target={pendingRevoke}
+          busy={revoking === pendingRevoke.deviceId}
+          onClose={() => {
+            if (revoking == null) setPendingRevoke(null);
+          }}
+          onConfirm={() => void confirmRevoke(pendingRevoke)}
+        />
+      )}
     </div>
+  );
+}
+
+interface RevokeTarget {
+  deviceId: string;
+  label: string;
+}
+
+/** 注销确认：设备要重新登录（电视上尤其麻烦），值得一次显式确认。 */
+function RevokeDeviceDialog({
+  target,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  target: RevokeTarget;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Modal open onClose={busy ? () => {} : onClose} label="注销播放器设备" topmost>
+      <div className="p-6 max-md:p-5">
+        <h2 className="text-title-sm font-bold text-white">注销这台设备？</h2>
+        <p className="mt-2 text-sub leading-6 text-[var(--text-muted)]">
+          「{target.label}」的登录凭据会立刻失效，正在进行的播放与下载一并停止，
+          该设备下次使用需要重新登录。
+        </p>
+        <p className="mt-3 text-caption leading-5 text-white/45">
+          已看进度、收藏这些观看记录按账号保存，不会因为注销设备而丢失。
+        </p>
+        <div className="mt-5 flex justify-end gap-2.5">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2 text-ui text-white/80 transition hover:bg-white/[0.1] disabled:opacity-40"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="rounded-lg bg-red-500/85 px-4 py-2 text-ui font-medium text-white transition hover:bg-red-500 disabled:opacity-40"
+          >
+            {busy ? "正在注销…" : "注销设备"}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }

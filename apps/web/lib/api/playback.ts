@@ -139,3 +139,12 @@ export async function fetchMediaActivity(): Promise<MediaActivitySnapshot> {
   const response = await request<ApiEnvelope<MediaActivitySnapshot>>("/playback/activity");
   return response.data;
 }
+
+/** 注销一台播放器设备：凭据即刻失效，其正在进行的播放与取流一并停止。 */
+export async function revokePlaybackDevice(deviceId: string): Promise<string> {
+  const response = await request<ApiEnvelope<null>>(
+    `/playback/devices/${encodeURIComponent(deviceId)}`,
+    { method: "DELETE" },
+  );
+  return response.message;
+}

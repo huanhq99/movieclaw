@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from movieclaw_api.api.deps import require_admin, require_login
+from movieclaw_api.exceptions import NotFoundException
 from movieclaw_api.schemas.playback import MediaActivityView, RecentWatchView
 from movieclaw_api.schemas.response import ApiResponse, ok
 from movieclaw_api.services.auth import Principal
 from movieclaw_api.services.library.access import visible_library_ids
-from movieclaw_api.services.playback_activity import media_activity_overview
+from movieclaw_api.services.playback_activity import media_activity_overview, revoke_device
 from movieclaw_api.services.playback_recent import recent_watch_items
 from movieclaw_db.engine import get_session
 
@@ -60,3 +61,25 @@ async def get_media_activity(
     管理员运维视角（跨成员可见），与首页按成员隔离的最近观看接口分离。
     """
     return ok(await media_activity_overview(session, recent_limit=recent_limit))
+
+
+@router.delete(
+    "/devices/{device_id}",
+    response_model=ApiResponse[None],
+    summary="注销播放器设备",
+    operation_id="playback.device.revoke",
+    dependencies=[Depends(require_admin)],
+    openapi_extra={"x-cli-hidden": True},
+)
+async def revoke_playback_device(
+    device_id: Annotated[str, Path(min_length=1, max_length=256)],
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[None]:
+    """注销一台播放器设备：凭据即刻失效，正在进行的播放与取流一并停止。
+
+    该设备下次访问需重新登录；已看进度、收藏等观看状态按成员保存，不受影响。
+    """
+    label = await revoke_device(session, device_id)
+    if label is None:
+        raise NotFoundException("设备不存在或已注销")
+    return ok(None, message=f"已注销「{label}」，该设备需重新登录")

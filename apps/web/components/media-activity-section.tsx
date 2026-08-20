@@ -459,21 +459,13 @@ function DownloadCard({
               {download.file_name}
             </OverflowText>
           )}
-          <div className="flex shrink-0 items-center gap-1.5">
-            <span
-              title="文件下载"
-              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)] max-md:bg-transparent max-md:p-0"
-            >
-              <DownloadIcon className="size-3 max-md:size-3.5" />
-              <span className="max-md:sr-only">文件下载</span>
-            </span>
-            <DeviceActionsMenu
-              deviceId={download.device_id}
-              deviceLabel={deviceLabel(download.client, download.device_name)}
-              onRevoke={onRevoke}
-              busy={busy}
-            />
-          </div>
+          {/* 分区标题已经写明「正在下载」，卡片不再重复一个同义徽标 */}
+          <DeviceActionsMenu
+            deviceId={download.device_id}
+            deviceLabel={deviceLabel(download.client, download.device_name)}
+            onRevoke={onRevoke}
+            busy={busy}
+          />
         </div>
         <MetaLine
           parts={[download.member_name, deviceLabel(download.client, download.device_name)]}
@@ -601,13 +593,16 @@ export function MediaActivityPanel({
         </p>
       )}
 
+      {/* 播放与下载分属两个分区：把下载塞进「正在播放」会让标题名不副实，
+          计数也会把不是播放的东西算进去。下载相对少见，因此「正在下载」
+          只在真有下载时出现，常态下页面仍只有一个实时分区。 */}
       <section className="mt-6" aria-label="正在播放">
         <SectionHeading
           icon={<PlayIcon className="size-4 text-[var(--info)]" />}
           title="正在播放"
-          count={liveCount}
+          count={snapshot.sessions.length}
         />
-        {liveCount === 0 ? (
+        {snapshot.sessions.length === 0 ? (
           <p className="rounded-2xl border border-white/[0.07] bg-white/[0.02] px-4 py-6 text-center text-sub text-[var(--text-muted)]">
             当前没有设备在播放；设备开始播放后几秒内会出现在这里。
           </p>
@@ -621,6 +616,18 @@ export function MediaActivityPanel({
                 busy={revoking != null}
               />
             ))}
+          </div>
+        )}
+      </section>
+
+      {snapshot.downloads.length > 0 && (
+        <section className="mt-7" aria-label="正在下载">
+          <SectionHeading
+            icon={<DownloadIcon className="size-4 text-[var(--info)]" />}
+            title="正在下载"
+            count={snapshot.downloads.length}
+          />
+          <div className="space-y-2.5">
             {snapshot.downloads.map((download) => (
               <DownloadCard
                 key={`${download.device_id}-${download.file_name}`}
@@ -630,8 +637,8 @@ export function MediaActivityPanel({
               />
             ))}
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
       {snapshot.recent.length > 0 && (
         <section className="mt-7" aria-label="最近观看">

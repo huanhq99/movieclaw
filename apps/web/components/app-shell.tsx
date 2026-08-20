@@ -36,7 +36,7 @@ import { usePermissions } from "@/lib/permissions";
  *   /                    新任务（氛围首页）
  *   /discover/movie|tv   发现电影 / 剧集
  *   /subscriptions       我的订阅
- *   /tasks               任务中心
+ *   /activity            活动（观看 / 任务）
  *   /media/[type]/[id]   影片详情
  *   /search?q=…          跨站搜索结果（范围/快照都在查询参数里）
  *   /sessions/[id]       AI 会话
@@ -53,7 +53,7 @@ function navIdFromPath(pathname: string): string {
   if (pathname === "/") return "new";
   if (pathname.startsWith("/library")) return "library";
   if (pathname.startsWith("/subscriptions")) return "subscriptions";
-  if (pathname.startsWith("/tasks")) return "tasks";
+  if (pathname.startsWith("/activity")) return "tasks";
   if (pathname.startsWith("/discover/movie")) return "explore-movies";
   if (pathname.startsWith("/discover/tv")) return "explore-tv";
   const session = /^\/sessions\/([^/]+)$/.exec(pathname);
@@ -70,7 +70,7 @@ function pathOfNavId(id: string): Route {
     case "subscriptions":
       return "/subscriptions";
     case "tasks":
-      return "/tasks" as Route;
+      return "/activity" as Route;
     case "explore-movies":
       return "/discover/movie" as Route;
     case "explore-tv":

@@ -881,7 +881,7 @@ async def _assert_not_busy(session: AsyncSession, library_name: str, library_id:
     if blocking is not None:
         raise ConflictException(
             f"「{library_name}」正在{labels[blocking.job_type]}，暂不能编辑或删除；"
-            "可到任务中心查看进度"
+            "可到活动页查看进度"
         )
 
 
@@ -933,7 +933,7 @@ async def _quiesce_scan_for_mutation(
             return
         await asyncio.sleep(0.05)
     raise ConflictException(
-        f"「{library_name}」的扫描正在安全停止，请稍后重试；可到任务中心查看进度"
+        f"「{library_name}」的扫描正在安全停止，请稍后重试；可到活动页查看进度"
     )
 
 
@@ -1112,9 +1112,9 @@ async def start_scan(
             created=created.created,
         ),
         message=(
-            f"已开始扫描「{library.name}」，可在任务中心继续观察"
+            f"已开始扫描「{library.name}」，可在活动页继续观察"
             if created.created
-            else f"「{library.name}」的扫描已在任务中心进行中"
+            else f"「{library.name}」的扫描已在活动页进行中"
         ),
     )
 
@@ -1208,7 +1208,7 @@ async def start_path_reconcile(
         message=(
             "已开始重新扫描并收口旧路径台账；仅修改数据库记录，不会删除磁盘文件"
             if created.created
-            else f"「{library.name}」的扫描已在任务中心进行中"
+            else f"「{library.name}」的扫描已在活动页进行中"
         ),
     )
 

@@ -45,7 +45,7 @@ export interface MediaActivityState {
 }
 
 /**
- * 媒体库活动快照的轮询装载。任务中心是唯一消费方，单挂载点即可，
+ * 媒体库活动快照的轮询装载。活动页是唯一消费方，单挂载点即可，
  * 不需要 Provider；页面隐藏时暂停，恢复可见立即校准。
  */
 export function useMediaActivity(enabled: boolean): MediaActivityState {
@@ -232,8 +232,8 @@ function ActivityTitle({ media }: { media: MediaActivityTarget }) {
 }
 
 /**
- * 状态徽标。窄屏收敛为单个彩色圆点（与任务中心既有约定一致，
- * docs/design/task-center.md：状态在移动端压缩为一个彩色圆点）——
+ * 状态徽标。窄屏收敛为单个彩色圆点（与任务视角既有约定一致，
+ * docs/design/activity.md：状态在移动端压缩为一个彩色圆点）——
  * 文字降为 sr-only 而不是从 DOM 摘除，读屏用户仍能听到状态。
  */
 function StatusBadge({ paused }: { paused: boolean }) {
@@ -525,7 +525,7 @@ function SectionHeading({
 }
 
 /**
- * 媒体库视图主体：正在播放（含整文件下载）→ 设备 → 最近观看。
+ * 「观看」视角主体：正在播放（含整文件下载）→ 设备 → 最近观看。
  * 实时段来自内存快照（服务重启即清空），历史段来自 playback_state 领域表。
  */
 export function MediaActivityPanel({ snapshot, loading, error }: MediaActivityState) {

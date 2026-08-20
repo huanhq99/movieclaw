@@ -788,7 +788,7 @@ async def _verify_upgrades_locked(session: AsyncSession, media_item_id: int) -> 
                             old_attempt.status = DownloadAttemptStatus.RETAINED
                             old_attempt.cleanup_note = (
                                 "洗版整季替换：多个旧任务无法自动比对文件重叠，"
-                                "保留做种，可在任务中心手动清理"
+                                "保留做种，可在活动页手动清理"
                             )
                         old_attempt.updated_at = now
             # 旧版本文件进回收站（quality-upgrade.md §7.1 / library-file-recycle.md），

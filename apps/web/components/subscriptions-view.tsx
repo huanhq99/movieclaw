@@ -689,7 +689,7 @@ function TodayArrivalsSection({
                 </div>
                 <div className="flex flex-col items-end gap-1 max-md:col-start-2 max-md:row-start-2 max-md:mt-1.5 max-md:flex-row max-md:items-center max-md:gap-2">
                   {presentation.statusLabel === "下载中" && canOpenTasks ? (
-                    <Link href={"/tasks?view=active" as Route} className={statusClass}>
+                    <Link href={"/activity?view=active" as Route} className={statusClass}>
                       下载中
                       <ChevronRightIcon className="size-3" />
                     </Link>

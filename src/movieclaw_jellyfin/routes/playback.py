@@ -294,7 +294,7 @@ async def video_stream(
     # 让 /Sessions/Playing/Stopped 能主动停止读盘；TCP 断连仍是第二道兜底。
     device_id = identity.device.device_id
     session_stopped = register_device_stream(device_id)
-    # 顺带登记到播放活动注册表：任务中心媒体库分类据此展示实时传输速率
+    # 顺带登记到播放活动注册表：活动页「观看」视角据此展示实时传输速率
     meter = activity.register_stream(
         device_id=device_id,
         kind=activity.STREAM_KIND_PLAY,
@@ -364,7 +364,7 @@ async def download_item(
     # 下载读盘；但下载器取消/断网后必须停止读盘（裸 FileResponse 会把几十 GB
     # 读到底），且保留 Content-Length 供下载器显示进度与续传
     is_download = request.url.path.lower().endswith("/download")
-    # 独立登记为下载活动：任务中心媒体库分类展示"谁在下哪个文件、多快"
+    # 独立登记为下载活动：活动页「观看」视角展示"谁在下哪个文件、多快"
     meter = activity.register_stream(
         device_id=identity.device.device_id,
         kind=activity.STREAM_KIND_DOWNLOAD,

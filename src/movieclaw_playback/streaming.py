@@ -129,7 +129,7 @@ class DisconnectAwareFileResponse(FileResponse):
         self._session_stopped = session_stopped
         self._on_close = on_close
         self._keep_content_length = keep_content_length
-        # 每发出一块调用一次的字节计量回调（任务中心媒体库分类的速率来源）；
+        # 每发出一块调用一次的字节计量回调（活动页「观看」视角的速率来源）；
         # 必须是同步且近零开销的，不能拖慢发送循环
         self._byte_sink = byte_sink
         self._disconnected = asyncio.Event()

@@ -1,4 +1,4 @@
-"""任务中心「媒体库」分类的聚合查询（docs/design/task-center.md）。
+"""活动页「观看」视角的聚合查询（docs/design/activity.md）。
 
 三段数据、三个事实源，本服务只做只读投影，不新增任何状态表：
 
@@ -248,7 +248,7 @@ async def _recent_plays(
 async def media_activity_overview(
     session: AsyncSession, *, recent_limit: int = 30
 ) -> MediaActivityView:
-    """装配任务中心媒体库分类的完整快照。"""
+    """装配活动页「观看」视角的完整快照。"""
     play_sessions, meters = activity.snapshot()
     play_meters = [m for m in meters if m.kind == activity.STREAM_KIND_PLAY]
     download_meters = [m for m in meters if m.kind == activity.STREAM_KIND_DOWNLOAD]

@@ -55,7 +55,7 @@ async def get_media_activity(
     recent_limit: Annotated[int, Query(ge=1, le=100)] = 30,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[MediaActivityView]:
-    """任务中心媒体库分类：正在播放/下载、设备清单与全成员最近观看。
+    """活动页「观看」视角：正在播放/下载、设备清单与全成员最近观看。
 
     管理员运维视角（跨成员可见），与首页按成员隔离的最近观看接口分离。
     """

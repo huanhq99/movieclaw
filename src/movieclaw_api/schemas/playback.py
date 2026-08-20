@@ -40,7 +40,7 @@ class RecentWatchView(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 任务中心「媒体库」分类（管理员运维视角，docs/design/task-center.md）
+# 活动页「观看」视角（管理员运维视角，docs/design/activity.md）
 # ---------------------------------------------------------------------------
 
 
@@ -140,7 +140,7 @@ class MediaRecentPlayView(BaseModel):
 
 
 class MediaActivityView(BaseModel):
-    """任务中心媒体库分类的完整数据载荷。"""
+    """活动页「观看」视角的完整数据载荷。"""
 
     sessions: list[ActivePlaybackSessionView]
     downloads: list[ActiveFileDownloadView]

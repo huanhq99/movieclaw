@@ -16,17 +16,11 @@ import { useToast } from "@/components/feedback";
 import {
   ChevronRightIcon,
   CheckIcon,
-  ClockIcon,
   FilmIcon,
   InfoIcon,
   TvIcon,
   XIcon,
 } from "@/components/icons";
-import {
-  MediaActivityPanel,
-  MediaActivitySummaryNav,
-  useMediaActivity,
-} from "@/components/media-activity-section";
 import { Modal } from "@/components/modal";
 import { OverflowText } from "@/components/overflow-text";
 import { PosterImage } from "@/components/poster-image";
@@ -76,20 +70,23 @@ const VIEW_LABELS: { id: TaskCenterViewName; label: string }[] = [
   { id: "active", label: "进行中" },
   { id: "attention", label: "需要处理" },
   { id: "history", label: "已结束" },
-  { id: "media", label: "媒体库" },
 ];
 
 /**
- * 完整任务中心：统一“观察入口”，不制造统一状态表。
+ * 任务视角：统一“观察入口”，不制造统一状态表。
  * Job 状态来自 MovieClaw 数据库，下载状态来自下载器实时快照，订阅关系仅按
  * infohash 投影视图；各自的取消、重试和入库生命周期仍由原领域负责。
+ *
+ * 页头与一级视角切换由 ActivityView 承担，本组件只渲染状态 tab 与任务内容。
  */
 export function TaskCenterView({
-  initialView = "all",
+  view,
+  onViewChange,
 }: {
-  initialView?: TaskCenterViewName;
+  view: TaskCenterViewName;
+  onViewChange: (view: TaskCenterViewName) => void;
 }) {
-  const [view, setView] = useState<TaskCenterViewName>(initialView);
+  const setView = onViewChange;
   // 选项卡在窄屏横向滚动：深链直达靠后的视图（如媒体库）时，激活项可能整个
   // 落在可视区之外，用户会以为该视图不存在。挂载与切换时把它滚进来。
   const activeTabRef = useRef<HTMLButtonElement | null>(null);
@@ -111,8 +108,6 @@ export function TaskCenterView({
     refreshedAt,
     refresh,
   } = useDownloadTasks();
-  // 媒体库活动只在需要它的视图轮询：明细视图 + 「全部」的汇总导航
-  const mediaActivity = useMediaActivity(view === "media" || view === "all");
 
   async function removeDownloadTask(task: DownloadTask, deleteFiles: boolean) {
     if (task.downloader_id == null || deletingTaskId != null) return;
@@ -252,32 +247,14 @@ export function TaskCenterView({
     (showActive && boostTasks.length > 0 ? 1 : 0) +
     (showHistory ? standaloneHistoricalJobs.length : 0);
   const failedSources = sources.filter((source) => source.status !== "active");
-  const liveMediaCount =
-    mediaActivity.snapshot.sessions.length + mediaActivity.snapshot.downloads.length;
   const viewCounts: Partial<Record<TaskCenterViewName, number>> = {
     attention: attentionTotal,
     active: activeTotal,
     history: standaloneHistoricalJobs.length,
-    media: liveMediaCount,
   };
 
   return (
-    <div className="scroll-thin scroll-safe h-full overflow-y-auto pb-10">
-      <div className="mx-auto w-full max-w-[1180px] px-6 pt-7 max-md:px-4 max-md:pt-4">
-        <header>
-          <div>
-            <div className="flex items-center gap-2.5">
-              <ClockIcon className="size-6 text-[var(--info)]" />
-              <h1 className="text-on-image text-[26px] font-bold leading-tight tracking-[-0.02em] text-white max-md:text-[21px]">
-                任务中心
-              </h1>
-            </div>
-            <p className="text-on-image mt-1.5 max-w-2xl text-ui leading-6 text-[var(--text-muted)]">
-              观察下载、入库和后台作业的完整过程，需要处理的任务会优先出现。
-            </p>
-          </div>
-        </header>
-
+    <>
         {/* 一切正常时的"自动更新正常 / 下载器 N/N 可用"是纯噪音，占掉首屏一整条；
             出问题时下面的 SourceWarning 会指名道姓说清哪个下载器怎么了并给出设置入口，
             比一句"0/1 可用"信息量更大，所以这条状态条整体去掉，只保留告警 */}
@@ -317,17 +294,6 @@ export function TaskCenterView({
                 : "等待刷新"}
           </p>
         </div>
-
-        {/* 「全部」保持任务处置语义：媒体库活动只投影为一条汇总导航，
-            明细（会话、设备、观看历史）全部由媒体库视图承载 */}
-        {view === "all" && (
-          <MediaActivitySummaryNav
-            snapshot={mediaActivity.snapshot}
-            onOpen={() => setView("media")}
-          />
-        )}
-
-        {view === "media" && <MediaActivityPanel {...mediaActivity} />}
 
         {showAttention && attentionTotal > 0 && (
           <TaskAttentionSection count={attentionTotal}>
@@ -394,16 +360,15 @@ export function TaskCenterView({
           />
         )}
 
-        {view !== "media" && visibleCount === 0 && !loading && <EmptyView view={view} />}
+        {visibleCount === 0 && !loading && <EmptyView view={view} />}
 
-        {view !== "media" && loading && visibleCount === 0 && (
+        {loading && visibleCount === 0 && (
           <div className="flex items-center justify-center gap-2.5 py-20 text-ui text-[var(--text-muted)]">
             <span className="size-4 animate-spin rounded-full border-2 border-white/20 border-t-white/70" />
             正在汇总任务…
           </div>
         )}
 
-      </div>
       {pendingDeleteTask && (
         <DeleteDownloadTaskDialog
           task={pendingDeleteTask}
@@ -414,7 +379,7 @@ export function TaskCenterView({
           onConfirm={(deleteFiles) => void removeDownloadTask(pendingDeleteTask, deleteFiles)}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -2209,10 +2174,10 @@ function downloadTaskNote(
     if (summary?.upgrade) {
       return task.state !== "completed"
         ? "已完成的部分已替换为新版本，其余等待下载完成"
-        : "替换已完成，等待任务中心同步收尾";
+        : "替换已完成，等待活动页同步收尾";
     }
     if (task.state !== "completed") return "已完成的部分已入库，其余等待下载完成";
-    return "入库已完成，等待任务中心同步收尾";
+    return "入库已完成，等待活动页同步收尾";
   }
   if (ingestJob?.status === "cancelled") {
     return "上次入库已取消，等待重新处理";
@@ -2349,8 +2314,6 @@ function EmptyView({ view }: { view: TaskCenterViewName }) {
     attention: { title: "当前无需处理", note: "异常或需要确认的任务会优先出现在这里。" },
     active: { title: "当前没有进行中的任务", note: "新任务启动后会自动进入实时过程。" },
     history: { title: "还没有历史记录", note: "完成和取消的后台作业会保留在这里。" },
-    // 媒体库视图有自己的分区空态，不走这里；键仅为类型完整
-    media: { title: "当前没有播放活动", note: "设备开始播放后会自动出现在这里。" },
   };
   return (
     <div className="mt-8 rounded-2xl border border-white/[0.07] bg-black/20 px-6 py-16 text-center backdrop-blur-xl">

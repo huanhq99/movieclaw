@@ -666,7 +666,7 @@ class TransferStartView(BaseModel):
 
     started: bool
     message: str
-    job_id: str = Field(description="持久化后台作业 ID，可在任务中心继续观察")
+    job_id: str = Field(description="持久化后台作业 ID，可在活动页继续观察")
     created: bool = Field(default=True, description="false 表示复用了仍在进行的同一作业")
 
 
@@ -1051,5 +1051,5 @@ class OrganizeStartView(BaseModel):
 
     started: bool
     message: str
-    job_id: str = Field(description="持久化后台作业 ID，可在任务中心继续观察")
+    job_id: str = Field(description="持久化后台作业 ID，可在活动页继续观察")
     created: bool = Field(default=True, description="false 表示复用了仍在进行的同一作业")

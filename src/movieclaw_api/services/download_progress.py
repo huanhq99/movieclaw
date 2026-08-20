@@ -632,7 +632,7 @@ async def _handle_stalled_attempt(
                 subscription_id=attempt.subscription_id,
                 type=ActivityType.DOWNLOAD_STALLED,
                 message=(
-                    "下载已连续 15 分钟没有进度，可在任务中心立即换种；"
+                    "下载已连续 15 分钟没有进度，可在活动页立即换种；"
                     "30 分钟时将自动寻找同品质替代源"
                 ),
                 payload={"info_hash": attempt.info_hash, "reason": "no_byte_progress"},

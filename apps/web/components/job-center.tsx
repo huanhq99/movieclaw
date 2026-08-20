@@ -715,35 +715,62 @@ function UsageMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** 需要用户判断的 Job 状态；与活动页任务视角的「需要处理」同口径。 */
+const ATTENTION_STATUSES = new Set<JobStatus>(["blocked", "failed"]);
+
+/**
+ * 侧栏「活动」入口。
+ *
+ * 角标只表达**当前最该被看见的那件事**，点击就直达那件事：有失败/阻塞的任务
+ * 时亮警示色并直接落到任务视角的「需要处理」——角标本身就是"有事要办"的信号，
+ * 点进去还要再切一次视角是纯粹的浪费；没有异常时回到常规的进行中计数，
+ * 点击落在默认的观看视角。
+ */
 export function JobCenter({ collapsed, active = false }: { collapsed: boolean; active?: boolean }) {
   const router = useRouter();
   const { isAdmin } = usePermissions();
-  const { activeJobs } = useJobs();
-  const { tasks: downloadTasks } = useDownloadTasks();
+  const { jobs, activeJobs } = useJobs();
+  const { tasks: downloadTasks, attentionTasks } = useDownloadTasks();
   if (!isAdmin) return null;
   // 刷流（boost）种子常年大量在跑，计入角标会让数字失去提醒意义，只数真实下载
   const activeCount =
     activeJobs.length + downloadTasks.filter((task) => task.source !== "boost").length;
+  const attentionCount =
+    jobs.filter((job) => ATTENTION_STATUSES.has(job.status)).length + attentionTasks.length;
+  const alert = attentionCount > 0;
+  const badgeCount = alert ? attentionCount : activeCount;
+  const href = (alert ? "/activity?view=attention" : "/activity") as Route;
+  const hint = alert ? `${attentionCount} 项需要处理` : `${activeCount} 个进行中`;
   return (
     <button
       type="button"
-      onClick={() => router.push("/tasks" as Route)}
+      onClick={() => router.push(href)}
       data-active={active}
-      title={collapsed ? `任务中心（${activeCount} 个进行中）` : undefined}
+      title={collapsed ? `活动（${hint}）` : undefined}
       className={`glass-row nav-item py-2 max-md:py-2.5 ${collapsed ? "justify-center px-0" : "px-3"}`}
     >
       <span className="relative shrink-0">
         <ClockIcon className="size-[18px] max-md:size-[22px]" />
-        {activeCount > 0 && (
-          <span className="absolute -right-1 -top-1 size-2 rounded-full bg-[var(--info)]" />
+        {badgeCount > 0 && (
+          <span
+            className={`absolute -right-1 -top-1 size-2 rounded-full ${
+              alert ? "bg-[var(--danger)]" : "bg-[var(--info)]"
+            }`}
+          />
         )}
       </span>
       {!collapsed && (
         <>
-          <span className="flex-1 text-ui font-medium">任务中心</span>
-          {activeCount > 0 && (
-            <span className="rounded-full bg-[var(--info)]/20 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-[var(--info)]">
-              {activeCount}
+          <span className="flex-1 text-ui font-medium">活动</span>
+          {badgeCount > 0 && (
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[11px] font-semibold leading-none ${
+                alert
+                  ? "bg-[var(--danger)]/20 text-[var(--danger)]"
+                  : "bg-[var(--info)]/20 text-[var(--info)]"
+              }`}
+            >
+              {badgeCount}
             </span>
           )}
         </>

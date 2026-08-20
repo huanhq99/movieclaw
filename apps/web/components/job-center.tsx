@@ -7,8 +7,8 @@ import { useRouter } from "next/navigation";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
 import {
+  ActivityIcon,
   ChevronRightIcon,
-  ClockIcon,
   MoreIcon,
 } from "@/components/icons";
 import { useLlmCapability } from "@/components/llm-gate";
@@ -750,7 +750,7 @@ export function JobCenter({ collapsed, active = false }: { collapsed: boolean; a
       className={`glass-row nav-item py-2 max-md:py-2.5 ${collapsed ? "justify-center px-0" : "px-3"}`}
     >
       <span className="relative shrink-0">
-        <ClockIcon className="size-[18px] max-md:size-[22px]" />
+        <ActivityIcon className="size-[18px] max-md:size-[22px]" />
         {badgeCount > 0 && (
           <span
             className={`absolute -right-1 -top-1 size-2 rounded-full ${

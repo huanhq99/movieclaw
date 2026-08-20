@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Route } from "next";
 import { usePathname, useRouter } from "next/navigation";
 
-import { ClockIcon } from "@/components/icons";
+import { ActivityIcon } from "@/components/icons";
 import { MediaActivityPanel, useMediaActivity } from "@/components/media-activity-section";
 import { TaskCenterView } from "@/components/task-center-view";
 import { usePageChrome } from "@/lib/page-chrome";
@@ -88,7 +88,7 @@ export function ActivityView({
         <header className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2.5">
-              <ClockIcon className="size-6 text-[var(--info)]" />
+              <ActivityIcon className="size-6 text-[var(--info)]" />
               <h1 className="text-on-image text-[26px] font-bold leading-tight tracking-[-0.02em] text-white max-md:text-[21px]">
                 活动
               </h1>

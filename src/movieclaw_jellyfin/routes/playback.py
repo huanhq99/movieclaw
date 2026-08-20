@@ -40,7 +40,9 @@ from movieclaw_jellyfin.ids import (
     media_source_guid,
 )
 from movieclaw_jellyfin.security import RequestIdentity, require_device
+from movieclaw_playback import activity
 from movieclaw_playback import state as playback_state
+from movieclaw_playback.events import ClientInfo
 from movieclaw_playback.streaming import (
     DisconnectAwareFileResponse,
     container_mime_type,
@@ -161,6 +163,41 @@ async def playback_info(
     )
 
 
+def _range_start(request: Request) -> int:
+    """请求 Range 的起始字节；无 Range 或形态不认识按 0（从头开始）。
+
+    只取起点：整文件下载据此还原真实下载位置（断点续传从中间开始，
+    只看本次已传字节会把进度算回 0）。后缀式 ``bytes=-N`` 表达"最后 N 字节"，
+    起点依赖文件长度，这里不做推断，按 0 处理（进度退化为保守读数）。
+    """
+    raw = (request.headers.get("Range") or "").strip().lower()
+    if not raw.startswith("bytes="):
+        return 0
+    first = raw[len("bytes=") :].split(",")[0].strip()
+    start = first.split("-")[0].strip()
+    if not start.isdigit():
+        return 0
+    return int(start)
+
+
+def _stream_unit(ref: EntityRef) -> playback_state.Unit:
+    """取流目标的播放单元（与 playstate._leaf_unit 同口径：电影 (0,0) 哨兵）。"""
+    if ref.kind == EntityKind.EPISODE:
+        return (ref.entity_id, ref.season, ref.episode)
+    return (ref.entity_id, 0, 0)
+
+
+def _identity_client(identity: RequestIdentity) -> ClientInfo:
+    """设备凭据 → 协议无关的客户端信息（活动注册表的设备展示字段）。"""
+    device = identity.device
+    return ClientInfo(
+        name=device.client or "",
+        device_name=device.device_name or "",
+        device_id=device.device_id or "",
+        version=device.version or "",
+    )
+
+
 def _unit_item_guid(ref: EntityRef) -> str:
     """播放单元的规范条目 GUID（DeliveryUrl 用，恒小写无横线）。"""
     if ref.kind == EntityKind.EPISODE:
@@ -257,11 +294,28 @@ async def video_stream(
     # 让 /Sessions/Playing/Stopped 能主动停止读盘；TCP 断连仍是第二道兜底。
     device_id = identity.device.device_id
     session_stopped = register_device_stream(device_id)
+    # 顺带登记到播放活动注册表：活动页「观看」视角据此展示实时传输速率
+    meter = activity.register_stream(
+        device_id=device_id,
+        kind=activity.STREAM_KIND_PLAY,
+        member_id=identity.device.member_id,
+        unit=_stream_unit(ref),
+        file_id=f.id,
+        file_name=path.name,
+        size_bytes=f.size_bytes,
+        client=_identity_client(identity),
+    )
+
+    def _close() -> None:
+        unregister_device_stream(device_id, session_stopped)
+        activity.unregister_stream(meter)
+
     return DisconnectAwareFileResponse(
         path,
         media_type=media_type,
         session_stopped=session_stopped,
-        on_close=lambda: unregister_device_stream(device_id, session_stopped),
+        byte_sink=meter.add,
+        on_close=_close,
     )
 
 
@@ -310,11 +364,25 @@ async def download_item(
     # 下载读盘；但下载器取消/断网后必须停止读盘（裸 FileResponse 会把几十 GB
     # 读到底），且保留 Content-Length 供下载器显示进度与续传
     is_download = request.url.path.lower().endswith("/download")
+    # 独立登记为下载活动：活动页「观看」视角展示"谁在下哪个文件、多快"
+    meter = activity.register_stream(
+        device_id=identity.device.device_id,
+        kind=activity.STREAM_KIND_DOWNLOAD,
+        member_id=identity.device.member_id,
+        unit=_stream_unit(ref),
+        file_id=f.id,
+        file_name=path.name,
+        size_bytes=f.size_bytes,
+        client=_identity_client(identity),
+        start_offset=_range_start(request),
+    )
     return DisconnectAwareFileResponse(
         path,
         media_type=container_mime_type(f.container or path.suffix),
         filename=path.name if is_download else None,
         keep_content_length=True,
+        byte_sink=meter.add,
+        on_close=lambda: activity.unregister_stream(meter),
     )
 
 

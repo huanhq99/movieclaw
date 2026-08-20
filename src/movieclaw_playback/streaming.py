@@ -118,6 +118,7 @@ class DisconnectAwareFileResponse(FileResponse):
         session_stopped: asyncio.Event | None = None,
         on_close: Callable[[], None] | None = None,
         keep_content_length: bool = False,
+        byte_sink: Callable[[int], None] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(path, **kwargs)
@@ -128,6 +129,9 @@ class DisconnectAwareFileResponse(FileResponse):
         self._session_stopped = session_stopped
         self._on_close = on_close
         self._keep_content_length = keep_content_length
+        # 每发出一块调用一次的字节计量回调（活动页「观看」视角的速率来源）；
+        # 必须是同步且近零开销的，不能拖慢发送循环
+        self._byte_sink = byte_sink
         self._disconnected = asyncio.Event()
         self._bytes_read = 0
         self._stop_logged = False
@@ -223,6 +227,8 @@ class DisconnectAwareFileResponse(FileResponse):
             size = self.chunk_size if end is None else min(self.chunk_size, end - start)
             chunk = await file.read(size)
             self._bytes_read += len(chunk)
+            if self._byte_sink is not None:
+                self._byte_sink(len(chunk))
             start += len(chunk)
             more_body = len(chunk) == self.chunk_size and (end is None or start < end)
             await send({"type": "http.response.body", "body": chunk, "more_body": more_body})
@@ -314,6 +320,8 @@ class DisconnectAwareFileResponse(FileResponse):
                         return
                     chunk = await file.read(min(self.chunk_size, end - start))
                     self._bytes_read += len(chunk)
+                    if self._byte_sink is not None:
+                        self._byte_sink(len(chunk))
                     start += len(chunk)
                     await send({"type": "http.response.body", "body": chunk, "more_body": True})
                 await send({"type": "http.response.body", "body": b"\r\n", "more_body": True})

@@ -37,3 +37,112 @@ class RecentWatchView(BaseModel):
     """最近观看横排的数据载荷。"""
 
     items: list[RecentWatchItemView]
+
+
+# ---------------------------------------------------------------------------
+# 活动页「观看」视角（管理员运维视角，docs/design/activity.md）
+# ---------------------------------------------------------------------------
+
+
+class MediaActivityTarget(BaseModel):
+    """播放会话 / 文件下载指向的媒体条目摘要。"""
+
+    media_item_id: int
+    # 详情页落点：同一作品跨库时取一个确定可达的库；无在位文件为 None
+    library_id: int | None
+    kind: MediaKind
+    title: str
+    year: int | None
+    poster_url: str | None
+    season_number: int
+    episode_number: int
+    episode_title: str | None
+
+
+class PlaybackFileSpec(BaseModel):
+    """正在播放文件的技术规格（来自 library_file 台账）。"""
+
+    resolution: str | None
+    video_codec: str | None
+    hdr: str | None
+    container: str | None
+    bit_rate: int | None
+    size_bytes: int | None
+
+
+class ActivePlaybackSessionView(BaseModel):
+    """一台设备正在进行的播放会话。"""
+
+    device_id: str
+    member_name: str
+    client: str
+    device_name: str
+    client_version: str
+    media: MediaActivityTarget
+    position_ms: int | None
+    duration_ms: int | None
+    progress_percent: int | None
+    paused: bool
+    # local = 本地文件直连（速率可测）；remote = 网盘直链等不经过服务器的播放
+    play_method: str
+    rate_bytes_per_second: float | None
+    bytes_sent: int | None
+    connections: int
+    file: PlaybackFileSpec | None
+    started_at: datetime
+    last_report_at: datetime
+
+
+class ActiveFileDownloadView(BaseModel):
+    """一条正在进行的整文件下载（播放器的离线缓存）。"""
+
+    device_id: str
+    member_name: str
+    client: str
+    device_name: str
+    media: MediaActivityTarget | None
+    file_name: str
+    size_bytes: int
+    bytes_sent: int
+    rate_bytes_per_second: float
+    # 同一设备对同一文件的多条 Range 连接（断点续传）聚合为一条展示
+    connections: int
+    # 已下载到文件的哪个位置（Range 起点 + 本次已传），以及据此换算的百分比。
+    # 文件大小未知时为 None，界面不画进度条而不是画一条假的。
+    position_bytes: int
+    progress_percent: int | None
+    started_at: datetime
+
+
+class PlaybackDeviceView(BaseModel):
+    """已登记的播放器设备。"""
+
+    device_id: str
+    device_name: str
+    client: str
+    client_version: str
+    member_name: str
+    last_seen_at: datetime | None
+    online: bool
+
+
+class MediaRecentPlayView(BaseModel):
+    """全成员维度的一条最近观看记录。"""
+
+    member_name: str
+    media: MediaActivityTarget
+    position_ms: int
+    duration_ms: int | None
+    progress_percent: int | None
+    played: bool
+    play_count: int
+    last_played_at: datetime
+
+
+class MediaActivityView(BaseModel):
+    """活动页「观看」视角的完整数据载荷。"""
+
+    sessions: list[ActivePlaybackSessionView]
+    downloads: list[ActiveFileDownloadView]
+    devices: list[PlaybackDeviceView]
+    recent: list[MediaRecentPlayView]

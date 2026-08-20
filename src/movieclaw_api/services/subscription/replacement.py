@@ -222,7 +222,7 @@ async def request_replacement(
     )
     await session.commit()
     if not result.rowcount:
-        raise BadRequestException("任务状态已经变化，请刷新任务中心后重试")
+        raise BadRequestException("任务状态已经变化，请刷新活动页后重试")
     await session.refresh(attempt)
     await SubscriptionRepository(session).add_activity(
         SubscriptionActivity(

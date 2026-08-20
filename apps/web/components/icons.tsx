@@ -88,6 +88,13 @@ export const ClockIcon = (p: IconProps) => (
   </Base>
 );
 
+/** 活动：脉冲折线。时钟表达的是"排队与历史"，活动要表达"此刻正在发生"。 */
+export const ActivityIcon = (p: IconProps) => (
+  <Base {...p}>
+    <path d="M3 12h4l2.5-7 3 14 2.5-7h6" />
+  </Base>
+);
+
 export const CalendarIcon = (p: IconProps) => (
   <Base {...p}>
     <rect x="3.5" y="5" width="17" height="15" rx="2" />

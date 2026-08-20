@@ -32,6 +32,7 @@ from movieclaw_jellyfin.catalog import (
 from movieclaw_jellyfin.errors import bad_request_text, not_found
 from movieclaw_jellyfin.ids import EntityKind, EntityRef, decode_guid
 from movieclaw_jellyfin.security import RequestIdentity, require_device
+from movieclaw_playback import activity
 from movieclaw_playback import state as playback_state
 from movieclaw_playback.events import (
     ClientInfo,
@@ -65,6 +66,16 @@ async def _read_body(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         return {}
     return {str(k).lower(): v for k, v in body.items()}
+
+
+def _paused_flag(body: dict[str, Any]) -> bool | None:
+    """上报里的 IsPaused；None = 本次没带该字段（实时会话保持原值）。"""
+    raw = body.get("ispaused")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.lower() == "true"
+    return None
 
 
 def _position_ms(body: dict[str, Any], query_ticks: str | None = None) -> int | None:
@@ -261,6 +272,12 @@ async def playing_start(
     ref = _decode_item_ref(body.get("itemid"))
     if ref is not None:
         member_id = identity.device.member_id
+        activity.report_start(
+            identity.device.device_id,
+            member_id=member_id,
+            client=_client_info(identity),
+            unit=_leaf_unit(ref),
+        )
         audio_track, subtitle_track = await _tracks_from_body(ref, body, member_id)
         await _record_start(
             ref,
@@ -343,9 +360,18 @@ async def playing_progress(
     ref = _decode_item_ref(body.get("itemid"))
     if ref is not None:
         position = _position_ms(body)
+        member_id = identity.device.member_id
+        # 实时会话不设位置门槛：暂停心跳（不带位置）也要刷新暂停态与保鲜时钟
+        activity.report_progress(
+            identity.device.device_id,
+            member_id=member_id,
+            client=_client_info(identity),
+            unit=_leaf_unit(ref),
+            position_ms=position,
+            paused=_paused_flag(body),
+        )
         # Progress 不带位置的心跳（如暂停事件）不落库；报 0 = 拖回开头要落
         if position is not None:
-            member_id = identity.device.member_id
             audio_track, subtitle_track = await _tracks_from_body(ref, body, member_id)
             await _apply_progress(
                 ref,
@@ -366,6 +392,7 @@ async def playing_stopped(
     # VidHub 的 Stopped 不代表它已立即关闭此前发出的 Range 请求。先取消同设备
     # 的活跃流，避免机械盘继续为已退出的播放器预读；失败停止同样必须收口。
     stop_device_streams(identity.device.device_id)
+    activity.report_stop(identity.device.device_id)
     failed = body.get("failed")
     if failed is True or (isinstance(failed, str) and failed.lower() == "true"):
         # 播放失败的上报不落库（SessionManager.cs:1164-1167）；字符串 "true"
@@ -408,6 +435,12 @@ async def playing_start_legacy(
 ) -> Response:
     ref = _decode_item_ref(item_id)
     if ref is not None:
+        activity.report_start(
+            identity.device.device_id,
+            member_id=identity.device.member_id,
+            client=_client_info(identity),
+            unit=_leaf_unit(ref),
+        )
         await _record_start(
             ref, _client_info(identity), member_id=identity.device.member_id
         )
@@ -425,6 +458,14 @@ async def playing_progress_legacy(
     ref = _decode_item_ref(item_id)
     if ref is not None:
         position = _position_ms({}, request.query_params.get("positionTicks"))
+        activity.report_progress(
+            identity.device.device_id,
+            member_id=identity.device.member_id,
+            client=_client_info(identity),
+            unit=_leaf_unit(ref),
+            position_ms=position,
+            paused=None,
+        )
         if position is not None:
             await _apply_progress(
                 ref,
@@ -445,6 +486,7 @@ async def playing_stopped_legacy(
 ) -> Response:
     ref = _decode_item_ref(item_id)
     stop_device_streams(identity.device.device_id)
+    activity.report_stop(identity.device.device_id)
     if ref is not None:
         await _apply_progress(
             ref,

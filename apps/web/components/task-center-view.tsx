@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Route } from "next";
 import Link from "next/link";
@@ -16,7 +16,6 @@ import { useToast } from "@/components/feedback";
 import {
   ChevronRightIcon,
   CheckIcon,
-  ClockIcon,
   FilmIcon,
   InfoIcon,
   TvIcon,
@@ -74,16 +73,26 @@ const VIEW_LABELS: { id: TaskCenterViewName; label: string }[] = [
 ];
 
 /**
- * 完整任务中心：统一“观察入口”，不制造统一状态表。
+ * 任务视角：统一“观察入口”，不制造统一状态表。
  * Job 状态来自 MovieClaw 数据库，下载状态来自下载器实时快照，订阅关系仅按
  * infohash 投影视图；各自的取消、重试和入库生命周期仍由原领域负责。
+ *
+ * 页头与一级视角切换由 ActivityView 承担，本组件只渲染状态 tab 与任务内容。
  */
 export function TaskCenterView({
-  initialView = "all",
+  view,
+  onViewChange,
 }: {
-  initialView?: TaskCenterViewName;
+  view: TaskCenterViewName;
+  onViewChange: (view: TaskCenterViewName) => void;
 }) {
-  const [view, setView] = useState<TaskCenterViewName>(initialView);
+  const setView = onViewChange;
+  // 选项卡在窄屏横向滚动：深链直达靠后的视图（如媒体库）时，激活项可能整个
+  // 落在可视区之外，用户会以为该视图不存在。挂载与切换时把它滚进来。
+  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "center" });
+  }, [view]);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [replacingTaskId, setReplacingTaskId] = useState<string | null>(null);
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
@@ -245,22 +254,7 @@ export function TaskCenterView({
   };
 
   return (
-    <div className="scroll-thin scroll-safe h-full overflow-y-auto pb-10">
-      <div className="mx-auto w-full max-w-[1180px] px-6 pt-7 max-md:px-4 max-md:pt-4">
-        <header>
-          <div>
-            <div className="flex items-center gap-2.5">
-              <ClockIcon className="size-6 text-[var(--info)]" />
-              <h1 className="text-on-image text-[26px] font-bold leading-tight tracking-[-0.02em] text-white max-md:text-[21px]">
-                任务中心
-              </h1>
-            </div>
-            <p className="text-on-image mt-1.5 max-w-2xl text-ui leading-6 text-[var(--text-muted)]">
-              观察下载、入库和后台作业的完整过程，需要处理的任务会优先出现。
-            </p>
-          </div>
-        </header>
-
+    <>
         {/* 一切正常时的"自动更新正常 / 下载器 N/N 可用"是纯噪音，占掉首屏一整条；
             出问题时下面的 SourceWarning 会指名道姓说清哪个下载器怎么了并给出设置入口，
             比一句"0/1 可用"信息量更大，所以这条状态条整体去掉，只保留告警 */}
@@ -274,6 +268,7 @@ export function TaskCenterView({
               <button
                 key={item.id}
                 type="button"
+                ref={view === item.id ? activeTabRef : undefined}
                 aria-pressed={view === item.id}
                 onClick={() => setView(item.id)}
                 className={`shrink-0 rounded-full px-3.5 py-1.5 text-ui font-medium transition ${
@@ -374,7 +369,6 @@ export function TaskCenterView({
           </div>
         )}
 
-      </div>
       {pendingDeleteTask && (
         <DeleteDownloadTaskDialog
           task={pendingDeleteTask}
@@ -385,7 +379,7 @@ export function TaskCenterView({
           onConfirm={(deleteFiles) => void removeDownloadTask(pendingDeleteTask, deleteFiles)}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -2181,10 +2175,10 @@ function downloadTaskNote(
     if (summary?.upgrade) {
       return task.state !== "completed"
         ? "已完成的部分已替换为新版本，其余等待下载完成"
-        : "替换已完成，等待任务中心同步收尾";
+        : "替换已完成，等待活动页同步收尾";
     }
     if (task.state !== "completed") return "已完成的部分已入库，其余等待下载完成";
-    return "入库已完成，等待任务中心同步收尾";
+    return "入库已完成，等待活动页同步收尾";
   }
   if (ingestJob?.status === "cancelled") {
     return "上次入库已取消，等待重新处理";

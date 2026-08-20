@@ -7,11 +7,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from movieclaw_api.api.deps import require_login
-from movieclaw_api.schemas.playback import RecentWatchView
+from movieclaw_api.api.deps import require_admin, require_login
+from movieclaw_api.schemas.playback import MediaActivityView, RecentWatchView
 from movieclaw_api.schemas.response import ApiResponse, ok
 from movieclaw_api.services.auth import Principal
 from movieclaw_api.services.library.access import visible_library_ids
+from movieclaw_api.services.playback_activity import media_activity_overview
 from movieclaw_api.services.playback_recent import recent_watch_items
 from movieclaw_db.engine import get_session
 
@@ -40,3 +41,22 @@ async def list_recent_watch(
         limit=limit,
     )
     return ok(RecentWatchView(items=items))
+
+
+@router.get(
+    "/activity",
+    response_model=ApiResponse[MediaActivityView],
+    summary="媒体库活动快照",
+    operation_id="playback.activity",
+    dependencies=[Depends(require_admin)],
+    openapi_extra={"x-cli-hidden": True},
+)
+async def get_media_activity(
+    recent_limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[MediaActivityView]:
+    """活动页「观看」视角：正在播放/下载、设备清单与全成员最近观看。
+
+    管理员运维视角（跨成员可见），与首页按成员隔离的最近观看接口分离。
+    """
+    return ok(await media_activity_overview(session, recent_limit=recent_limit))

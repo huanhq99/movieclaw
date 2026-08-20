@@ -104,6 +104,28 @@ function deviceLabel(client: string, deviceName: string): string {
   return deviceName || client || "未知设备";
 }
 
+/** 元信息行：过滤空片段后用「·」连接，避免设备名或客户端缺失时留下悬空分隔符。 */
+function MetaLine({
+  parts,
+  className = "",
+}: {
+  parts: (string | null | undefined)[];
+  className?: string;
+}) {
+  const kept = parts.filter((part): part is string => Boolean(part && part.trim()));
+  if (kept.length === 0) return null;
+  return (
+    <p className={`truncate text-caption leading-5 text-white/40 ${className}`}>
+      {kept.map((part, index) => (
+        <span key={index}>
+          {index > 0 && <span className="mx-1.5 text-white/20">·</span>}
+          {part}
+        </span>
+      ))}
+    </p>
+  );
+}
+
 function detailHref(media: MediaActivityTarget): Route | null {
   if (media.library_id == null) return null;
   return `/library/${media.library_id}/item/${media.media_item_id}` as Route;
@@ -139,7 +161,7 @@ export function MediaActivitySummaryNav({
     >
       <span className="relative flex size-2 shrink-0" aria-hidden="true">
         {!allPaused && (
-          <span className="absolute inline-flex size-2 animate-ping rounded-full bg-[var(--info)]/60" />
+          <span className="absolute inline-flex size-2 motion-safe:animate-ping rounded-full bg-[var(--info)]/60" />
         )}
         <span className="relative inline-flex size-2 rounded-full bg-[var(--info)]" />
       </span>
@@ -221,7 +243,7 @@ function StatusBadge({ paused }: { paused: boolean }) {
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--ok)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--ok)]">
       <span className="relative flex size-1.5" aria-hidden="true">
-        <span className="absolute inline-flex size-1.5 animate-ping rounded-full bg-[var(--ok)]/60" />
+        <span className="absolute inline-flex size-1.5 motion-safe:animate-ping rounded-full bg-[var(--ok)]/60" />
         <span className="relative inline-flex size-1.5 rounded-full bg-[var(--ok)]" />
       </span>
       播放中
@@ -248,14 +270,14 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
             <ActivityTitle media={media} />
             <StatusBadge paused={session.paused} />
           </div>
-          <p className="mt-1 truncate text-caption leading-5 text-white/50">
-            <span className="text-white/65">{session.member_name}</span>
-            <span className="mx-1.5 text-white/25">·</span>
-            {deviceLabel(session.client, session.device_name)}
-            {session.client_version && (
-              <span className="ml-1 text-white/30">{session.client_version}</span>
-            )}
-          </p>
+          <MetaLine
+            className="mt-1"
+            parts={[
+              session.member_name,
+              deviceLabel(session.client, session.device_name),
+              session.client_version,
+            ]}
+          />
           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
             {session.play_method === "local" ? (
               <>
@@ -324,11 +346,10 @@ function DownloadCard({ download }: { download: ActiveFileDownload }) {
               文件下载
             </span>
           </div>
-          <p className="mt-1 truncate text-caption leading-5 text-white/50">
-            <span className="text-white/65">{download.member_name}</span>
-            <span className="mx-1.5 text-white/25">·</span>
-            {deviceLabel(download.client, download.device_name)}
-          </p>
+          <MetaLine
+            className="mt-1"
+            parts={[download.member_name, deviceLabel(download.client, download.device_name)]}
+          />
           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
             {download.rate_bytes_per_second > 0 && (
               <span className="tnum font-medium text-[var(--info)]">
@@ -359,7 +380,7 @@ function DeviceRow({ device }: { device: PlaybackDevice }) {
     <div className="flex items-center gap-3 px-4 py-3 max-md:px-3.5">
       <span className="relative flex size-2 shrink-0" aria-hidden="true">
         {device.online && (
-          <span className="absolute inline-flex size-2 animate-ping rounded-full bg-[var(--ok)]/50" />
+          <span className="absolute inline-flex size-2 motion-safe:animate-ping rounded-full bg-[var(--ok)]/50" />
         )}
         <span
           className={`relative inline-flex size-2 rounded-full ${
@@ -371,12 +392,16 @@ function DeviceRow({ device }: { device: PlaybackDevice }) {
         <p className="truncate text-ui text-white/85">
           {device.device_name || device.client || device.device_id}
         </p>
-        <p className="mt-0.5 truncate text-caption text-white/40">
-          {device.client}
-          {device.client_version && ` ${device.client_version}`}
-          <span className="mx-1.5 text-white/20">·</span>
-          {device.member_name}
-        </p>
+        <MetaLine
+          className="mt-0.5"
+          parts={[
+            // 设备名缺席时客户端已经当了主标题，副行不再重复一遍
+            device.device_name
+              ? [device.client, device.client_version].filter(Boolean).join(" ")
+              : null,
+            device.member_name,
+          ]}
+        />
       </div>
       <span
         className={`shrink-0 text-caption ${
@@ -399,11 +424,10 @@ function RecentRow({ entry }: { entry: MediaRecentPlay }) {
       <ActivityPoster media={entry.media} className="h-[42px] w-[28px]" />
       <div className="min-w-0 flex-1">
         <ActivityTitle media={entry.media} />
-        <p className="mt-0.5 truncate text-caption text-white/40">
-          {formatRelativeTime(entry.last_played_at)}
-          <span className="mx-1.5 text-white/20">·</span>
-          {entry.member_name}
-        </p>
+        <MetaLine
+          className="mt-0.5"
+          parts={[formatRelativeTime(entry.last_played_at), entry.member_name]}
+        />
       </div>
       {entry.played ? (
         <span className="inline-flex shrink-0 items-center gap-1 text-caption text-[var(--ok)]">

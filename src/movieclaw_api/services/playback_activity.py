@@ -43,6 +43,7 @@ from movieclaw_db.models import (
 from movieclaw_media.models import MediaKind
 from movieclaw_playback import activity
 from movieclaw_playback.state import Unit
+from movieclaw_playback.streaming import is_strm
 
 
 @dataclass
@@ -279,7 +280,13 @@ async def media_activity_overview(
         device_meters = [
             m for m in play_meters if m.device_id == play.device_id and m.unit == play.unit
         ]
-        streaming = play.local_streamed or bool(device_meters)
+        # 播放方式认台账里的文件形态，不靠"是否已经看到字节"倒推——上报先于
+        # 取流到达是常态，用字节推断会把刚开播的本地文件误标成网盘直链。
+        # 没有在位台账行（条目刚被删/改）才退回字节证据。
+        if ctx.file is not None:
+            streaming = not is_strm(ctx.file.file_path)
+        else:
+            streaming = play.local_streamed or bool(device_meters)
         session_views.append(
             ActivePlaybackSessionView(
                 device_id=play.device_id,

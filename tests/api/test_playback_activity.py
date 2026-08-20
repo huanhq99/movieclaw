@@ -152,8 +152,9 @@ async def test_assembles_sessions_devices_and_recent(client: TestClient) -> None
     assert live["position_ms"] == 1_200_000
     assert live["duration_ms"] == 148 * 60_000
     assert live["progress_percent"] == 14
-    # 没有本地取流：网盘直链/仅上报口径，速率不可测而不是 0
-    assert live["play_method"] == "remote"
+    # 本地台账文件：即使还没看到字节也是本地直连（上报先于取流是常态），
+    # 速率此刻不可测 → null，而不是伪造成 0
+    assert live["play_method"] == "local"
     assert live["rate_bytes_per_second"] is None
 
     devices = {d["device_id"]: d for d in data["devices"]}
@@ -207,3 +208,39 @@ async def test_download_connections_aggregate_per_file(client: TestClient) -> No
     assert download["connections"] == 3
     assert download["bytes_sent"] == 3_000
     assert download["media"]["title"] == "黑客帝国"
+
+
+async def test_strm_session_reports_remote_play_method(client: TestClient) -> None:
+    """strm 网盘条目走 302 直链、流量不经过服务器：标注 remote 而非伪造速率。"""
+    async with get_database().session() as session:
+        movie = MediaItem(
+            kind="movie",
+            tmdb_id=157336,
+            title="星际穿越",
+            original_title="Interstellar",
+            year=2014,
+            aliases=[],
+        )
+        library = Library(name="网盘库", kind="movie", root_paths=["/media/cloud"])
+        session.add_all([movie, library])
+        await session.commit()
+        session.add(
+            LibraryFile(
+                library_id=library.id,
+                media_item_id=movie.id,
+                file_path="/media/cloud/interstellar.strm",
+                source="scanned",
+            )
+        )
+        await session.commit()
+        movie_id = movie.id
+
+    info = ClientInfo(
+        name="Infuse", device_name="客厅 Apple TV", device_id="dev-5", version="8.0"
+    )
+    activity.report_start("dev-5", member_id=0, client=info, unit=(movie_id, 0, 0))
+
+    data = client.get("/api/v1/playback/activity").json()["data"]
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["play_method"] == "remote"
+    assert data["sessions"][0]["rate_bytes_per_second"] is None

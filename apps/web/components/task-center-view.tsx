@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Route } from "next";
 import Link from "next/link";
@@ -90,6 +90,12 @@ export function TaskCenterView({
   initialView?: TaskCenterViewName;
 }) {
   const [view, setView] = useState<TaskCenterViewName>(initialView);
+  // 选项卡在窄屏横向滚动：深链直达靠后的视图（如媒体库）时，激活项可能整个
+  // 落在可视区之外，用户会以为该视图不存在。挂载与切换时把它滚进来。
+  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "center" });
+  }, [view]);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [replacingTaskId, setReplacingTaskId] = useState<string | null>(null);
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
@@ -285,6 +291,7 @@ export function TaskCenterView({
               <button
                 key={item.id}
                 type="button"
+                ref={view === item.id ? activeTabRef : undefined}
                 aria-pressed={view === item.id}
                 onClick={() => setView(item.id)}
                 className={`shrink-0 rounded-full px-3.5 py-1.5 text-ui font-medium transition ${

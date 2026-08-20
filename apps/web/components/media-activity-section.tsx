@@ -262,65 +262,103 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
     session.file?.size_bytes ? formatBytes(session.file.size_bytes) : null,
   ].filter(Boolean) as string[];
   return (
-    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 max-md:p-3.5">
-      <div className="flex gap-3.5 max-md:gap-3">
-        <ActivityPoster media={media} className="h-[78px] w-[52px]" />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-2.5">
-            <ActivityTitle media={media} />
-            <StatusBadge paused={session.paused} />
-          </div>
-          <MetaLine
-            className="mt-1"
-            parts={[
-              session.member_name,
-              deviceLabel(session.client, session.device_name),
-              session.client_version,
-            ]}
-          />
-          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
-            {session.play_method === "local" ? (
-              <>
-                {session.rate_bytes_per_second != null && session.rate_bytes_per_second > 0 ? (
-                  <span className="tnum font-medium text-[var(--info)]">
-                    {formatRate(session.rate_bytes_per_second)}
-                  </span>
-                ) : (
-                  <span className="text-white/55">本地直连</span>
-                )}
-                {session.bytes_sent != null && session.bytes_sent > 0 && (
-                  <span className="tnum">已传输 {formatBytes(session.bytes_sent)}</span>
-                )}
-                {session.connections > 1 && <span>{session.connections} 条连接</span>}
-              </>
-            ) : (
-              <span>网盘直链 · 流量不经过服务器</span>
-            )}
-            {specParts.length > 0 && <span className="text-white/35">{specParts.join(" · ")}</span>}
-          </div>
+    <ActivityCard>
+      <ActivityPoster media={media} className="h-24 w-16 max-md:h-[76px] max-md:w-[52px]" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-start justify-between gap-2.5">
+          <ActivityTitle media={media} />
+          <StatusBadge paused={session.paused} />
         </div>
+        <MetaLine
+          parts={[
+            session.member_name,
+            deviceLabel(session.client, session.device_name),
+            session.client_version,
+          ]}
+        />
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
+          {session.play_method === "local" ? (
+            <>
+              {session.rate_bytes_per_second != null && session.rate_bytes_per_second > 0 ? (
+                <span className="tnum font-medium text-[var(--info)]">
+                  {formatRate(session.rate_bytes_per_second)}
+                </span>
+              ) : (
+                <span className="text-white/55">本地直连</span>
+              )}
+              {session.bytes_sent != null && session.bytes_sent > 0 && (
+                <span className="tnum">已传输 {formatBytes(session.bytes_sent)}</span>
+              )}
+              {session.connections > 1 && <span>{session.connections} 条连接</span>}
+            </>
+          ) : (
+            <span>网盘直链 · 流量不经过服务器</span>
+          )}
+          {/* 规格串在窄屏会折成孤字行，移动端交给详情页 */}
+          {specParts.length > 0 && (
+            <span className="text-white/35 max-md:hidden">{specParts.join(" · ")}</span>
+          )}
+        </div>
+        <ProgressLine
+          percent={percent}
+          positionMs={session.position_ms}
+          durationMs={session.duration_ms}
+          muted={session.paused}
+        />
       </div>
+    </ActivityCard>
+  );
+}
+
+/** 会话/下载共用的卡片外壳：高度由海报决定，右栏纵向铺满。 */
+function ActivityCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex gap-3.5 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-3.5 max-md:gap-3 max-md:p-3">
+      {children}
+    </div>
+  );
+}
+
+/**
+ * 进度条与时刻同处一行：宽屏下进度条不再横跨整卡、时间与百分比也不再分居
+ * 两端隔着大片空白，眼睛一次就能把「进度 / 位置 / 百分比」对上。
+ */
+function ProgressLine({
+  percent,
+  positionMs,
+  durationMs,
+  muted,
+}: {
+  percent: number | null;
+  positionMs: number | null;
+  durationMs: number | null;
+  muted: boolean;
+}) {
+  if (percent == null && positionMs == null) return null;
+  return (
+    <div className="mt-auto flex items-center gap-2.5 pt-1.5">
       {percent != null && (
-        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
+        // 限宽：宽屏下无限拉伸会把进度条抻成一条分割线，并把时刻推到视野另一端
+        <div className="h-1 w-full min-w-8 max-w-[220px] overflow-hidden rounded-full bg-white/[0.07]">
           <div
             className="h-full rounded-full transition-[width] duration-700"
             style={{
               width: `${Math.min(100, Math.max(1, percent))}%`,
-              backgroundColor: session.paused ? "rgba(255,255,255,0.28)" : "var(--info)",
+              backgroundColor: muted ? "rgba(255,255,255,0.28)" : "var(--info)",
             }}
           />
         </div>
       )}
-      {session.position_ms != null && (
-        <div className="tnum mt-1.5 flex items-center justify-between text-caption text-white/40">
-          <span>
-            {formatPlayClock(session.position_ms)}
-            {session.duration_ms != null && (
-              <span className="text-white/25"> / {formatPlayClock(session.duration_ms)}</span>
-            )}
-          </span>
-          {percent != null && <span>{percent}%</span>}
-        </div>
+      {positionMs != null && (
+        <span className="tnum shrink-0 text-caption text-white/45">
+          {formatPlayClock(positionMs)}
+          {durationMs != null && (
+            <span className="text-white/25"> / {formatPlayClock(durationMs)}</span>
+          )}
+        </span>
+      )}
+      {percent != null && (
+        <span className="tnum shrink-0 text-caption font-medium text-white/55">{percent}%</span>
       )}
     </div>
   );
@@ -329,49 +367,46 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
 function DownloadCard({ download }: { download: ActiveFileDownload }) {
   const media = download.media;
   return (
-    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 max-md:p-3.5">
-      <div className="flex gap-3.5 max-md:gap-3">
-        <ActivityPoster media={media} className="h-[78px] w-[52px]" />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-2.5">
-            {media ? (
-              <ActivityTitle media={media} />
-            ) : (
-              <OverflowText lines={1} className="text-ui font-semibold text-white/90">
-                {download.file_name}
-              </OverflowText>
-            )}
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)]">
-              <DownloadIcon className="size-3" />
-              文件下载
-            </span>
-          </div>
-          <MetaLine
-            className="mt-1"
-            parts={[download.member_name, deviceLabel(download.client, download.device_name)]}
-          />
-          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
-            {download.rate_bytes_per_second > 0 && (
-              <span className="tnum font-medium text-[var(--info)]">
-                {formatRate(download.rate_bytes_per_second)}
-              </span>
-            )}
-            <span className="tnum">
-              本次已传 {formatBytes(download.bytes_sent)}
-              {download.size_bytes > 0 && (
-                <span className="text-white/25"> / {formatBytes(download.size_bytes)}</span>
-              )}
-            </span>
-            {download.connections > 1 && <span>{download.connections} 条连接</span>}
-          </div>
-          {media && (
-            <OverflowText lines={1} className="mt-1 text-caption text-white/30">
+    <ActivityCard>
+      <ActivityPoster media={media} className="h-24 w-16 max-md:h-[76px] max-md:w-[52px]" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-start justify-between gap-2.5">
+          {media ? (
+            <ActivityTitle media={media} />
+          ) : (
+            <OverflowText lines={1} className="text-ui font-semibold text-white/90">
               {download.file_name}
             </OverflowText>
           )}
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)]">
+            <DownloadIcon className="size-3" />
+            文件下载
+          </span>
         </div>
+        <MetaLine
+          parts={[download.member_name, deviceLabel(download.client, download.device_name)]}
+        />
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
+          {download.rate_bytes_per_second > 0 && (
+            <span className="tnum font-medium text-[var(--info)]">
+              {formatRate(download.rate_bytes_per_second)}
+            </span>
+          )}
+          <span className="tnum">
+            本次已传 {formatBytes(download.bytes_sent)}
+            {download.size_bytes > 0 && (
+              <span className="text-white/25"> / {formatBytes(download.size_bytes)}</span>
+            )}
+          </span>
+          {download.connections > 1 && <span>{download.connections} 条连接</span>}
+        </div>
+        {media && (
+          <OverflowText lines={1} className="mt-auto pt-1.5 text-caption text-white/30">
+            {download.file_name}
+          </OverflowText>
+        )}
       </div>
-    </div>
+    </ActivityCard>
   );
 }
 

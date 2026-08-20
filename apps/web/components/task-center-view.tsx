@@ -982,6 +982,7 @@ function BoostTaskSection({ tasks }: { tasks: DownloadTask[] }) {
 function BoostTaskRow({ task }: { task: DownloadTask }) {
   const downloading = task.state === "downloading";
   const percent = task.progress == null ? null : Math.floor(task.progress * 100);
+  const showDownloadNote = (downloading && percent != null) || (task.dlspeed_bytes ?? 0) > 0;
   const name = (
     <OverflowText className="min-w-0 flex-1 text-ui text-white/80">
       {task.name || task.info_hash}
@@ -996,30 +997,19 @@ function BoostTaskRow({ task }: { task: DownloadTask }) {
           </span>
         )}
       </div>
-      <div className="flex min-w-0 flex-1 items-center gap-x-2">
-        {task.page_url ? (
-          <a
-            href={task.page_url}
-            target="_blank"
-            rel="noreferrer"
-            className="flex min-w-0 flex-1 hover:text-white"
-            title="打开站点种子详情页"
-          >
-            {name}
-          </a>
-        ) : (
-          name
-        )}
-        {/* 下载中的刷流种子是少数：进度与下行速度都跟在名称后面按需出现，不占固定列 */}
-        {downloading && percent != null && (
-          <span className="tnum shrink-0 text-caption text-white/35">{percent}%</span>
-        )}
-        <SpeedStat
-          direction="down"
-          bytesPerSecond={task.dlspeed_bytes}
-          className="shrink-0 text-caption"
-        />
-      </div>
+      {task.page_url ? (
+        <a
+          href={task.page_url}
+          target="_blank"
+          rel="noreferrer"
+          className="flex min-w-0 flex-1 hover:text-white"
+          title="打开站点种子详情页"
+        >
+          {name}
+        </a>
+      ) : (
+        name
+      )}
       {/* 窄屏字号比桌面大一档（--text-caption 11px → 13px），5.5rem 装不下
           "↑ 63.95 KB/s"，速度会被折成两行。窄屏改用按内容需求配比的弹性列
           （速度 : 累计 : 体积 ≈ 9 : 10 : 7），列宽随屏宽缩放而比例不变——既保住逐行
@@ -1033,6 +1023,15 @@ function BoostTaskRow({ task }: { task: DownloadTask }) {
         </span>
         <span>{task.size_bytes != null ? formatBytes(task.size_bytes) : "—"}</span>
       </div>
+      {/* 下载中的刷流种子是少数，进度与下行速度不占固定列，另起一行挂在数字列下方：
+          既不因为多出两个值把逐行对齐搞乱，也保证 ↑ 永远排在 ↓ 前面，和分组汇总
+          头部（↑ 速度 → ↓ 速度 → 已上传 → 已下载）的"上传在前"口径一致 */}
+      {showDownloadNote && (
+        <div className="flex w-full items-center justify-end gap-x-2 text-caption text-white/35">
+          {downloading && percent != null && <span className="tnum">{percent}%</span>}
+          <SpeedStat direction="down" bytesPerSecond={task.dlspeed_bytes} />
+        </div>
+      )}
     </div>
   );
 }

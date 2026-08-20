@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import and_, func, select
@@ -43,7 +44,9 @@ from movieclaw_db.models import (
 from movieclaw_media.models import MediaKind
 from movieclaw_playback import activity
 from movieclaw_playback.state import Unit
-from movieclaw_playback.streaming import is_strm
+from movieclaw_playback.streaming import is_strm, stop_device_streams
+
+logger = logging.getLogger("movieclaw_api.playback_activity")
 
 
 @dataclass
@@ -415,3 +418,37 @@ async def media_activity_overview(
         devices=device_views,
         recent=recent_views,
     )
+
+
+async def revoke_device(session: AsyncSession, device_id: str) -> str | None:
+    """注销一台播放器设备：删凭据行并当场把它踢下线。
+
+    三件事缺一不可，否则"注销"名不副实：
+    1. 删 ``jellyfin_device`` 行——AccessToken 是设备级长期凭据，删行即失效，
+       该设备下次请求就要重新登录；
+    2. 结束实时会话——否则活动页还会按 5 分钟保鲜期继续显示一台已不存在的
+       设备在播放；
+    3. 停掉仍在读盘的取流——播放器不会因为 token 失效就主动断开已建立的
+       Range 连接，不停就会继续为一台已注销的设备转磁盘。
+
+    返回被注销设备的展示名；设备不存在返回 None（调用方给 404）。
+    """
+    device = (
+        await session.execute(
+            select(JellyfinDevice).where(JellyfinDevice.device_id == device_id)
+        )
+    ).scalar_one_or_none()
+    if device is None:
+        return None
+    label = device.device_name or device.client or device.device_id
+    await session.delete(device)
+    await session.commit()
+
+    activity.report_stop(device_id)
+    stopped = stop_device_streams(device_id)
+    logger.info(
+        "播放器设备「%s」已注销，凭据即刻失效，同时停止了 %d 条仍在读取的流",
+        label,
+        stopped,
+    )
+    return label

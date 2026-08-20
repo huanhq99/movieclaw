@@ -570,6 +570,7 @@ _PATH_DUMMIES = {
     "{rule_id}": "1",
     "{entry_id}": "1",
     "{file_id}": "1",
+    "{device_id}": "no-such-device",
     "{token_id}": "1",
     "{notice_id}": "1",
     "{run_id}": "test-run",

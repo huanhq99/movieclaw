@@ -1,4 +1,4 @@
-"""任务中心媒体库活动接口（GET /playback/activity）的装配测试。
+"""活动页「观看」视角接口（/playback/activity、设备注销）的测试。
 
 成员越权由 tests/api/test_member_auth.py 的守护测试兜底（本路由挂
 require_admin 且不在成员白名单），这里只测管理员视角的数据装配。
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from movieclaw_api.core.config import get_settings
 from movieclaw_api.services.auth import reset_auth_state
@@ -283,3 +284,89 @@ async def test_download_progress_counts_resume_offset(client: TestClient) -> Non
     assert download["progress_percent"] == 90
     # 本次连接只传了 1000 字节，与"下载到哪"是两个读数
     assert download["bytes_sent"] == 1_000
+
+
+async def test_revoke_device_drops_credential_and_live_session(client: TestClient) -> None:
+    """注销设备：删凭据行 + 结束实时会话；再次注销给 404。"""
+    async with get_database().session() as session:
+        movie = MediaItem(
+            kind="movie",
+            tmdb_id=155,
+            title="蝙蝠侠：黑暗骑士",
+            original_title="The Dark Knight",
+            year=2008,
+            aliases=[],
+        )
+        session.add(movie)
+        session.add(
+            JellyfinDevice(
+                member_id=0,
+                token="tok-revoke",
+                device_id="dev-revoke",
+                client="Infuse",
+                device_name="书房电视",
+                version="8.0",
+                last_seen_at=utcnow(),
+            )
+        )
+        await session.commit()
+        movie_id = movie.id
+
+    info = ClientInfo(
+        name="Infuse", device_name="书房电视", device_id="dev-revoke", version="8.0"
+    )
+    activity.report_start("dev-revoke", member_id=0, client=info, unit=(movie_id, 0, 0))
+    assert len(client.get("/api/v1/playback/activity").json()["data"]["sessions"]) == 1
+
+    resp = client.delete("/api/v1/playback/devices/dev-revoke")
+    assert resp.status_code == 200
+    assert "书房电视" in resp.json()["message"]
+
+    data = client.get("/api/v1/playback/activity").json()["data"]
+    # 凭据行与实时会话同时消失，不留一台"已注销却还在播"的幽灵设备
+    assert data["devices"] == []
+    assert data["sessions"] == []
+
+    # 凭据确实失效：该 token 不再能通过 Jellyfin 设备鉴权
+    async with get_database().session() as session:
+        remaining = (
+            await session.execute(
+                select(JellyfinDevice).where(JellyfinDevice.device_id == "dev-revoke")
+            )
+        ).scalar_one_or_none()
+    assert remaining is None
+
+    assert client.delete("/api/v1/playback/devices/dev-revoke").status_code == 404
+
+
+async def test_revoke_device_keeps_watch_history(client: TestClient) -> None:
+    """注销设备不动观看记录：进度按账号保存，与设备凭据无关。"""
+    async with get_database().session() as session:
+        movie = MediaItem(
+            kind="movie",
+            tmdb_id=680,
+            title="低俗小说",
+            original_title="Pulp Fiction",
+            year=1994,
+            aliases=[],
+        )
+        session.add(movie)
+        session.add(
+            JellyfinDevice(member_id=0, token="tok-x", device_id="dev-x", client="Infuse")
+        )
+        await session.commit()
+        session.add(
+            PlaybackState(
+                member_id=0,
+                media_item_id=movie.id,
+                position_ms=900_000,
+                play_count=1,
+                last_played_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+    assert client.delete("/api/v1/playback/devices/dev-x").status_code == 200
+    recent = client.get("/api/v1/playback/activity").json()["data"]["recent"]
+    assert len(recent) == 1
+    assert recent[0]["media"]["title"] == "低俗小说"

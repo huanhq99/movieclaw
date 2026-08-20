@@ -67,6 +67,7 @@ def _poster_url(item: MediaItem, poster_file: str | None, image_base: str) -> st
 def _target(unit: Unit, ctx: _UnitContext) -> MediaActivityTarget:
     return MediaActivityTarget(
         media_item_id=unit[0],
+        library_id=ctx.file.library_id if ctx.file else None,
         kind=MediaKind(ctx.item.kind),
         title=ctx.item.title,
         year=ctx.item.year,
@@ -209,6 +210,8 @@ async def _recent_plays(
             MediaEpisode.name,
             MediaEpisode.runtime_minutes,
             func.max(LibraryFile.duration_seconds).label("file_duration_seconds"),
+            # 详情页落点：跨库时取 id 最小的库，保证链接确定且可达
+            func.min(LibraryFile.library_id).label("library_id"),
         )
         .join(ranked_states, ranked_states.c.state_id == PlaybackState.id)
         .join(MediaItem, MediaItem.id == PlaybackState.media_item_id)
@@ -307,21 +310,30 @@ async def media_activity_overview(
             )
         )
 
+    # 同一设备下载同一文件会并发/续传出多条 Range 连接，聚合为一条展示
+    download_groups: dict[tuple[str, int | str], list] = {}
+    for meter in download_meters:
+        key = (meter.device_id, meter.file_id if meter.file_id is not None else meter.file_name)
+        download_groups.setdefault(key, []).append(meter)
     download_views: list[ActiveFileDownloadView] = []
-    for meter in sorted(download_meters, key=lambda m: m.started_at, reverse=True):
-        ctx = contexts.get(meter.unit)
+    for group in sorted(
+        download_groups.values(), key=lambda g: min(m.started_at for m in g), reverse=True
+    ):
+        first = group[0]
+        ctx = contexts.get(first.unit)
         download_views.append(
             ActiveFileDownloadView(
-                device_id=meter.device_id,
-                member_name=names[meter.member_id],
-                client=meter.client.name,
-                device_name=meter.client.device_name,
-                media=_target(meter.unit, ctx) if ctx else None,
-                file_name=meter.file_name,
-                size_bytes=meter.size_bytes,
-                bytes_sent=meter.bytes_sent,
-                rate_bytes_per_second=meter.rate_bytes_per_second(),
-                started_at=meter.started_at,
+                device_id=first.device_id,
+                member_name=names[first.member_id],
+                client=first.client.name,
+                device_name=first.client.device_name,
+                media=_target(first.unit, ctx) if ctx else None,
+                file_name=first.file_name,
+                size_bytes=first.size_bytes,
+                bytes_sent=sum(m.bytes_sent for m in group),
+                rate_bytes_per_second=sum(m.rate_bytes_per_second() for m in group),
+                connections=len(group),
+                started_at=min(m.started_at for m in group),
             )
         )
 
@@ -351,6 +363,7 @@ async def media_activity_overview(
         episode_name,
         episode_runtime_minutes,
         file_duration_seconds,
+        library_id,
     ) in recent_rows:
         duration_ms = _runtime_ms(
             file_duration_seconds,
@@ -362,6 +375,7 @@ async def media_activity_overview(
                 member_name=names[state.member_id],
                 media=MediaActivityTarget(
                     media_item_id=item.id,
+                    library_id=library_id,
                     kind=MediaKind(item.kind),
                     title=item.title,
                     year=item.year,

@@ -48,6 +48,8 @@ class MediaActivityTarget(BaseModel):
     """播放会话 / 文件下载指向的媒体条目摘要。"""
 
     media_item_id: int
+    # 详情页落点：同一作品跨库时取一个确定可达的库；无在位文件为 None
+    library_id: int | None
     kind: MediaKind
     title: str
     year: int | None
@@ -103,6 +105,8 @@ class ActiveFileDownloadView(BaseModel):
     size_bytes: int
     bytes_sent: int
     rate_bytes_per_second: float
+    # 同一设备对同一文件的多条 Range 连接（断点续传）聚合为一条展示
+    connections: int
     started_at: datetime
 
 

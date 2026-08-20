@@ -2,7 +2,16 @@
 
 import { useCallback, useRef, useState } from "react";
 
-import { ChevronRightIcon, DownloadIcon, PlayIcon, ServerIcon } from "@/components/icons";
+import type { Route } from "next";
+import Link from "next/link";
+
+import {
+  CheckIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  PlayIcon,
+  ServerIcon,
+} from "@/components/icons";
 import { OverflowText } from "@/components/overflow-text";
 import { PosterImage } from "@/components/poster-image";
 import {
@@ -95,6 +104,11 @@ function deviceLabel(client: string, deviceName: string): string {
   return deviceName || client || "未知设备";
 }
 
+function detailHref(media: MediaActivityTarget): Route | null {
+  if (media.library_id == null) return null;
+  return `/library/${media.library_id}/item/${media.media_item_id}` as Route;
+}
+
 /**
  * 「全部」视图顶部的媒体库活动汇总导航：只报数与聚合速率，明细交给
  * 媒体库视图承载，不把播放行混进任务 Feed。没有实时活动时不渲染。
@@ -109,6 +123,7 @@ export function MediaActivitySummaryNav({
   const playing = snapshot.sessions.length;
   const downloading = snapshot.downloads.length;
   if (playing === 0 && downloading === 0) return null;
+  const allPaused = playing > 0 && snapshot.sessions.every((s) => s.paused);
   const totalRate =
     snapshot.sessions.reduce((sum, s) => sum + (s.rate_bytes_per_second ?? 0), 0) +
     snapshot.downloads.reduce((sum, d) => sum + d.rate_bytes_per_second, 0);
@@ -120,10 +135,15 @@ export function MediaActivitySummaryNav({
     <button
       type="button"
       onClick={onOpen}
-      className="mt-4 flex w-full items-center gap-3 rounded-xl border border-[var(--info)]/25 bg-[var(--info)]/[0.07] px-4 py-3 text-left transition hover:bg-[var(--info)]/[0.12]"
+      className="mt-4 flex w-full items-center gap-3 rounded-xl border border-[var(--info)]/25 bg-[var(--info)]/[0.07] px-4 py-3 text-left transition hover:border-[var(--info)]/40 hover:bg-[var(--info)]/[0.12]"
     >
-      <PlayIcon className="size-4 shrink-0 text-[var(--info)]" />
-      <span className="min-w-0 flex-1 text-sub text-white/85">
+      <span className="relative flex size-2 shrink-0" aria-hidden="true">
+        {!allPaused && (
+          <span className="absolute inline-flex size-2 animate-ping rounded-full bg-[var(--info)]/60" />
+        )}
+        <span className="relative inline-flex size-2 rounded-full bg-[var(--info)]" />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-sub text-white/85">
         <span className="font-semibold">媒体库</span>
         <span className="tnum ml-2.5 text-white/60">{parts.join(" · ")}</span>
       </span>
@@ -135,20 +155,82 @@ export function MediaActivitySummaryNav({
   );
 }
 
-/** 会话/下载卡与历史行共用的海报位。 */
-function ActivityPoster({ media }: { media: MediaActivityTarget | null }) {
-  return (
+/** 会话/下载卡的海报位；可跳详情时整块可点。 */
+function ActivityPoster({
+  media,
+  className,
+}: {
+  media: MediaActivityTarget | null;
+  className: string;
+}) {
+  const image = (
     <PosterImage
       src={media?.poster_url ? imageUrl(media.poster_url) : null}
       alt={media?.title ?? "未知内容"}
-      className="h-[72px] w-12 shrink-0 rounded-lg object-cover"
+      className={`${className} rounded-lg object-cover ring-1 ring-white/10`}
     />
+  );
+  const href = media ? detailHref(media) : null;
+  if (!href) return <span className="shrink-0">{image}</span>;
+  return (
+    <Link href={href} className="shrink-0 transition hover:opacity-80">
+      {image}
+    </Link>
+  );
+}
+
+/** 作品标题（含年份 / 季集 / 单集名）；可跳详情时标题可点。 */
+function ActivityTitle({ media }: { media: MediaActivityTarget }) {
+  const unit = unitLabel(media);
+  const href = detailHref(media);
+  const text = (
+    <>
+      {media.title}
+      {media.year != null && <span className="ml-1.5 font-normal text-white/45">{media.year}</span>}
+      {unit && <span className="tnum ml-1.5 font-normal text-white/60">{unit}</span>}
+      {media.episode_title && (
+        <span className="ml-1.5 font-normal text-white/45">{media.episode_title}</span>
+      )}
+    </>
+  );
+  if (!href) {
+    return (
+      <OverflowText lines={1} className="text-ui font-semibold text-white/90">
+        {text}
+      </OverflowText>
+    );
+  }
+  return (
+    <OverflowText lines={1} className="text-ui font-semibold text-white/90">
+      <Link href={href} className="transition hover:text-white">
+        {text}
+      </Link>
+    </OverflowText>
+  );
+}
+
+function StatusBadge({ paused }: { paused: boolean }) {
+  if (paused) {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-white/[0.08] px-2 py-0.5 text-caption font-semibold text-white/55">
+        <span className="size-1.5 rounded-full bg-white/40" aria-hidden="true" />
+        已暂停
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--ok)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--ok)]">
+      <span className="relative flex size-1.5" aria-hidden="true">
+        <span className="absolute inline-flex size-1.5 animate-ping rounded-full bg-[var(--ok)]/60" />
+        <span className="relative inline-flex size-1.5 rounded-full bg-[var(--ok)]" />
+      </span>
+      播放中
+    </span>
   );
 }
 
 function SessionCard({ session }: { session: ActivePlaybackSession }) {
   const media = session.media;
-  const unit = unitLabel(media);
   const percent = session.progress_percent;
   const specParts = [
     session.file?.resolution,
@@ -158,43 +240,33 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
     session.file?.size_bytes ? formatBytes(session.file.size_bytes) : null,
   ].filter(Boolean) as string[];
   return (
-    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-3.5">
-      <div className="flex gap-3">
-        <ActivityPoster media={media} />
+    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 max-md:p-3.5">
+      <div className="flex gap-3.5 max-md:gap-3">
+        <ActivityPoster media={media} className="h-[78px] w-[52px]" />
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2.5">
-            <OverflowText lines={1} className="text-ui font-semibold text-white/90">
-              {media.title}
-              {media.year != null && <span className="ml-1.5 text-white/45">{media.year}</span>}
-              {unit && <span className="tnum ml-1.5 text-white/60">{unit}</span>}
-              {media.episode_title && (
-                <span className="ml-1.5 text-white/45">{media.episode_title}</span>
-              )}
-            </OverflowText>
-            <span
-              className={`shrink-0 rounded-full px-2 py-0.5 text-caption font-semibold ${
-                session.paused
-                  ? "bg-white/[0.08] text-white/55"
-                  : "bg-[var(--ok)]/12 text-[var(--ok)]"
-              }`}
-            >
-              {session.paused ? "已暂停" : "播放中"}
-            </span>
+            <ActivityTitle media={media} />
+            <StatusBadge paused={session.paused} />
           </div>
-          <p className="mt-1 text-caption leading-5 text-white/50">
-            {session.member_name} · {deviceLabel(session.client, session.device_name)}
+          <p className="mt-1 truncate text-caption leading-5 text-white/50">
+            <span className="text-white/65">{session.member_name}</span>
+            <span className="mx-1.5 text-white/25">·</span>
+            {deviceLabel(session.client, session.device_name)}
             {session.client_version && (
-              <span className="text-white/30"> {session.client_version}</span>
+              <span className="ml-1 text-white/30">{session.client_version}</span>
             )}
           </p>
           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
             {session.play_method === "local" ? (
               <>
-                <span className="text-white/55">本地直连</span>
-                {session.rate_bytes_per_second != null && (
-                  <span className="tnum">{formatRate(session.rate_bytes_per_second)}</span>
+                {session.rate_bytes_per_second != null && session.rate_bytes_per_second > 0 ? (
+                  <span className="tnum font-medium text-[var(--info)]">
+                    {formatRate(session.rate_bytes_per_second)}
+                  </span>
+                ) : (
+                  <span className="text-white/55">本地直连</span>
                 )}
-                {session.bytes_sent != null && (
+                {session.bytes_sent != null && session.bytes_sent > 0 && (
                   <span className="tnum">已传输 {formatBytes(session.bytes_sent)}</span>
                 )}
                 {session.connections > 1 && <span>{session.connections} 条连接</span>}
@@ -202,24 +274,31 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
             ) : (
               <span>网盘直链 · 流量不经过服务器</span>
             )}
-            {specParts.length > 0 && <span>{specParts.join(" · ")}</span>}
+            {specParts.length > 0 && <span className="text-white/35">{specParts.join(" · ")}</span>}
           </div>
         </div>
       </div>
       {percent != null && (
-        <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
+        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
           <div
-            className="h-full rounded-full bg-[var(--info)] transition-[width] duration-700"
-            style={{ width: `${Math.min(100, Math.max(1, percent))}%` }}
+            className="h-full rounded-full transition-[width] duration-700"
+            style={{
+              width: `${Math.min(100, Math.max(1, percent))}%`,
+              backgroundColor: session.paused ? "rgba(255,255,255,0.28)" : "var(--info)",
+            }}
           />
         </div>
       )}
       {session.position_ms != null && (
-        <p className="tnum mt-1.5 text-caption text-white/40">
-          {formatPlayClock(session.position_ms)}
-          {session.duration_ms != null && ` / ${formatPlayClock(session.duration_ms)}`}
-          {percent != null && ` · ${percent}%`}
-        </p>
+        <div className="tnum mt-1.5 flex items-center justify-between text-caption text-white/40">
+          <span>
+            {formatPlayClock(session.position_ms)}
+            {session.duration_ms != null && (
+              <span className="text-white/25"> / {formatPlayClock(session.duration_ms)}</span>
+            )}
+          </span>
+          {percent != null && <span>{percent}%</span>}
+        </div>
       )}
     </div>
   );
@@ -227,35 +306,48 @@ function SessionCard({ session }: { session: ActivePlaybackSession }) {
 
 function DownloadCard({ download }: { download: ActiveFileDownload }) {
   const media = download.media;
-  const unit = media ? unitLabel(media) : null;
   return (
-    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-3.5">
-      <div className="flex gap-3">
-        <ActivityPoster media={media} />
+    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 max-md:p-3.5">
+      <div className="flex gap-3.5 max-md:gap-3">
+        <ActivityPoster media={media} className="h-[78px] w-[52px]" />
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2.5">
-            <OverflowText lines={1} className="text-ui font-semibold text-white/90">
-              {media ? media.title : download.file_name}
-              {unit && <span className="tnum ml-1.5 text-white/60">{unit}</span>}
-            </OverflowText>
-            <span className="flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)]">
+            {media ? (
+              <ActivityTitle media={media} />
+            ) : (
+              <OverflowText lines={1} className="text-ui font-semibold text-white/90">
+                {download.file_name}
+              </OverflowText>
+            )}
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--info)]/12 px-2 py-0.5 text-caption font-semibold text-[var(--info)]">
               <DownloadIcon className="size-3" />
               文件下载
             </span>
           </div>
-          <p className="mt-1 text-caption leading-5 text-white/50">
-            {download.member_name} · {deviceLabel(download.client, download.device_name)}
+          <p className="mt-1 truncate text-caption leading-5 text-white/50">
+            <span className="text-white/65">{download.member_name}</span>
+            <span className="mx-1.5 text-white/25">·</span>
+            {deviceLabel(download.client, download.device_name)}
           </p>
           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption text-white/40">
-            <span className="tnum">{formatRate(download.rate_bytes_per_second)}</span>
+            {download.rate_bytes_per_second > 0 && (
+              <span className="tnum font-medium text-[var(--info)]">
+                {formatRate(download.rate_bytes_per_second)}
+              </span>
+            )}
             <span className="tnum">
               本次已传 {formatBytes(download.bytes_sent)}
-              {download.size_bytes > 0 && ` / 文件 ${formatBytes(download.size_bytes)}`}
+              {download.size_bytes > 0 && (
+                <span className="text-white/25"> / {formatBytes(download.size_bytes)}</span>
+              )}
             </span>
-            <OverflowText lines={1} className="min-w-0 max-w-full text-white/30">
+            {download.connections > 1 && <span>{download.connections} 条连接</span>}
+          </div>
+          {media && (
+            <OverflowText lines={1} className="mt-1 text-caption text-white/30">
               {download.file_name}
             </OverflowText>
-          </div>
+          )}
         </div>
       </div>
     </div>
@@ -264,27 +356,33 @@ function DownloadCard({ download }: { download: ActiveFileDownload }) {
 
 function DeviceRow({ device }: { device: PlaybackDevice }) {
   return (
-    <div className="flex items-center gap-3 px-3.5 py-2.5">
+    <div className="flex items-center gap-3 px-4 py-3 max-md:px-3.5">
       <span className="relative flex size-2 shrink-0" aria-hidden="true">
+        {device.online && (
+          <span className="absolute inline-flex size-2 animate-ping rounded-full bg-[var(--ok)]/50" />
+        )}
         <span
-          className={`size-2 rounded-full ${
-            device.online ? "bg-[var(--ok)] ring-4 ring-[var(--ok)]/15" : "bg-white/20"
+          className={`relative inline-flex size-2 rounded-full ${
+            device.online ? "bg-[var(--ok)]" : "bg-white/20"
           }`}
         />
       </span>
       <div className="min-w-0 flex-1">
         <p className="truncate text-ui text-white/85">
           {device.device_name || device.client || device.device_id}
-          {device.client && device.device_name && (
-            <span className="ml-2 text-caption text-white/45">
-              {device.client}
-              {device.client_version && ` ${device.client_version}`}
-            </span>
-          )}
+        </p>
+        <p className="mt-0.5 truncate text-caption text-white/40">
+          {device.client}
+          {device.client_version && ` ${device.client_version}`}
+          <span className="mx-1.5 text-white/20">·</span>
+          {device.member_name}
         </p>
       </div>
-      <span className="shrink-0 text-caption text-white/50">{device.member_name}</span>
-      <span className="w-24 shrink-0 text-right text-caption text-white/35 max-md:hidden">
+      <span
+        className={`shrink-0 text-caption ${
+          device.online ? "font-medium text-[var(--ok)]" : "text-white/35"
+        }`}
+      >
         {device.online
           ? "正在活动"
           : device.last_seen_at
@@ -296,30 +394,27 @@ function DeviceRow({ device }: { device: PlaybackDevice }) {
 }
 
 function RecentRow({ entry }: { entry: MediaRecentPlay }) {
-  const unit = unitLabel(entry.media);
-  const result = entry.played
-    ? "已看完"
-    : entry.progress_percent != null
-      ? `看到 ${entry.progress_percent}%`
-      : "播放过";
   return (
-    <div className="flex items-center gap-3 px-3.5 py-2.5">
-      <span className="w-16 shrink-0 text-caption text-white/35">
-        {formatRelativeTime(entry.last_played_at)}
-      </span>
-      <span className="shrink-0 text-caption text-white/50">{entry.member_name}</span>
-      <OverflowText lines={1} className="min-w-0 flex-1 text-ui text-white/85">
-        {entry.media.title}
-        {unit && <span className="tnum ml-1.5 text-white/55">{unit}</span>}
-        {entry.media.episode_title && (
-          <span className="ml-1.5 text-white/45">{entry.media.episode_title}</span>
-        )}
-      </OverflowText>
-      <span
-        className={`shrink-0 text-caption ${entry.played ? "text-[var(--ok)]" : "text-white/45"}`}
-      >
-        {result}
-      </span>
+    <div className="flex items-center gap-3 px-4 py-2.5 max-md:px-3.5">
+      <ActivityPoster media={entry.media} className="h-[42px] w-[28px]" />
+      <div className="min-w-0 flex-1">
+        <ActivityTitle media={entry.media} />
+        <p className="mt-0.5 truncate text-caption text-white/40">
+          {formatRelativeTime(entry.last_played_at)}
+          <span className="mx-1.5 text-white/20">·</span>
+          {entry.member_name}
+        </p>
+      </div>
+      {entry.played ? (
+        <span className="inline-flex shrink-0 items-center gap-1 text-caption text-[var(--ok)]">
+          <CheckIcon className="size-3" />
+          已看完
+        </span>
+      ) : (
+        <span className="tnum shrink-0 text-caption text-white/45">
+          {entry.progress_percent != null ? `看到 ${entry.progress_percent}%` : "播放过"}
+        </span>
+      )}
     </div>
   );
 }
@@ -381,10 +476,16 @@ export function MediaActivityPanel({ snapshot, loading, error }: MediaActivitySt
         ) : (
           <div className="space-y-2.5">
             {snapshot.sessions.map((session) => (
-              <SessionCard key={`${session.device_id}-${session.media.media_item_id}`} session={session} />
+              <SessionCard
+                key={`${session.device_id}-${session.media.media_item_id}-${session.media.season_number}-${session.media.episode_number}`}
+                session={session}
+              />
             ))}
-            {snapshot.downloads.map((download, index) => (
-              <DownloadCard key={`${download.device_id}-${download.file_name}-${index}`} download={download} />
+            {snapshot.downloads.map((download) => (
+              <DownloadCard
+                key={`${download.device_id}-${download.file_name}`}
+                download={download}
+              />
             ))}
           </div>
         )}
@@ -414,7 +515,10 @@ export function MediaActivityPanel({ snapshot, loading, error }: MediaActivitySt
           />
           <div className="divide-y divide-white/[0.06] rounded-2xl border border-white/[0.08] bg-white/[0.02]">
             {snapshot.recent.map((entry, index) => (
-              <RecentRow key={`${entry.member_name}-${entry.media.media_item_id}-${index}`} entry={entry} />
+              <RecentRow
+                key={`${entry.member_name}-${entry.media.media_item_id}-${index}`}
+                entry={entry}
+              />
             ))}
           </div>
         </section>

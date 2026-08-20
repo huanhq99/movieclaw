@@ -141,3 +141,20 @@ def test_pure_report_session_stays_remote() -> None:
     activity.report_start("dev-1", member_id=0, client=CLIENT, unit=UNIT)
     sessions, _ = activity.snapshot()
     assert sessions[0].local_streamed is False
+
+
+def test_repeat_start_keeps_session_identity() -> None:
+    """同单元重复上报开始（seek / 恢复播放）保留原会话身份与起始时间。"""
+    activity.report_start("dev-1", member_id=0, client=CLIENT, unit=UNIT)
+    sessions, _ = activity.snapshot()
+    started_at = sessions[0].started_at
+    activity.report_progress(
+        "dev-1", member_id=0, client=CLIENT, unit=UNIT, position_ms=60_000, paused=False
+    )
+
+    activity.report_start("dev-1", member_id=0, client=CLIENT, unit=UNIT)
+    sessions, _ = activity.snapshot()
+    assert len(sessions) == 1
+    assert sessions[0].started_at == started_at
+    # 已看位置不因重复开始而闪回
+    assert sessions[0].position_ms == 60_000

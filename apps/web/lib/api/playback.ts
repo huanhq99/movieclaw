@@ -46,6 +46,8 @@ export async function listRecentWatch(limit = 20): Promise<RecentWatchItem[]> {
 
 export interface MediaActivityTarget {
   media_item_id: number;
+  /** 详情页落点；作品没有在位文件时为 null（此时不渲染跳转）。 */
+  library_id: number | null;
   kind: MediaType;
   title: string;
   year: number | null;
@@ -95,6 +97,8 @@ export interface ActiveFileDownload {
   size_bytes: number;
   bytes_sent: number;
   rate_bytes_per_second: number;
+  /** 同一设备同一文件的多条 Range 连接（断点续传）聚合后的连接数。 */
+  connections: number;
   started_at: string;
 }
 

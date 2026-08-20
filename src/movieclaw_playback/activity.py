@@ -104,8 +104,20 @@ _meters: list[StreamMeter] = []
 def report_start(
     device_id: str, *, member_id: int, client: ClientInfo, unit: Unit
 ) -> None:
-    """播放开始上报：为设备建立（或切换到）新的播放会话。"""
+    """播放开始上报：为设备建立（或切换到）新的播放会话。
+
+    同一设备对同一单元重复上报开始（seek、暂停后恢复、部分客户端换源
+    重协商都会再发 Playing），保留原会话身份——否则起始时间与已看位置
+    会在实时视图里无意义地闪回。
+    """
     if not device_id:
+        return
+    existing = _sessions.get(device_id)
+    if existing is not None and existing.unit == unit:
+        existing.member_id = member_id
+        existing.client = client
+        existing.last_report_at = utcnow()
+        existing.last_activity_mono = time.monotonic()
         return
     _sessions[device_id] = PlaySession(
         device_id=device_id, member_id=member_id, client=client, unit=unit

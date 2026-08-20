@@ -14,7 +14,14 @@ from movieclaw_api.services.auth import reset_auth_state
 from movieclaw_api.settings.store import reset_setting_store
 from movieclaw_db.crypto import reset_secret_box
 from movieclaw_db.engine import get_database
-from movieclaw_db.models import JellyfinDevice, MediaItem, MediaMetadata, PlaybackState
+from movieclaw_db.models import (
+    JellyfinDevice,
+    Library,
+    LibraryFile,
+    MediaItem,
+    MediaMetadata,
+    PlaybackState,
+)
 from movieclaw_db.models.base import utcnow
 from movieclaw_playback import activity
 from movieclaw_playback.events import ClientInfo
@@ -67,9 +74,25 @@ async def test_assembles_sessions_devices_and_recent(client: TestClient) -> None
             year=2010,
             aliases=[],
         )
-        session.add(movie)
+        library = Library(name="电影库", kind="movie", root_paths=["/media/movies"])
+        session.add_all([movie, library])
         await session.commit()
         session.add(MediaMetadata(media_item_id=movie.id, runtime_minutes=148))
+        session.add(
+            LibraryFile(
+                library_id=library.id,
+                media_item_id=movie.id,
+                file_path="/media/movies/inception.mkv",
+                size_bytes=28_000_000_000,
+                container="mkv",
+                resolution="2160p",
+                video_codec="hevc",
+                hdr="HDR10",
+                bit_rate=45_000_000,
+                duration_seconds=8880,
+                source="scanned",
+            )
+        )
         session.add(
             JellyfinDevice(
                 member_id=0,
@@ -102,6 +125,7 @@ async def test_assembles_sessions_devices_and_recent(client: TestClient) -> None
         )
         await session.commit()
         movie_id = movie.id
+        library_id = library.id
 
     unit = (movie_id, 0, 0)
     info = ClientInfo(
@@ -121,6 +145,10 @@ async def test_assembles_sessions_devices_and_recent(client: TestClient) -> None
     assert live["member_name"] == "admin"
     assert live["device_name"] == "客厅 Apple TV"
     assert live["media"]["title"] == "盗梦空间"
+    # 详情页落点与文件规格来自在位台账行
+    assert live["media"]["library_id"] == library_id
+    assert live["file"]["resolution"] == "2160p"
+    assert live["file"]["hdr"] == "HDR10"
     assert live["position_ms"] == 1_200_000
     assert live["duration_ms"] == 148 * 60_000
     assert live["progress_percent"] == 14
@@ -137,4 +165,45 @@ async def test_assembles_sessions_devices_and_recent(client: TestClient) -> None
     recent = data["recent"][0]
     assert recent["member_name"] == "admin"
     assert recent["media"]["title"] == "盗梦空间"
+    assert recent["media"]["library_id"] == library_id
     assert recent["progress_percent"] == 11
+
+
+async def test_download_connections_aggregate_per_file(client: TestClient) -> None:
+    """同设备同文件的多条 Range 连接聚合为一条：速率与字节求和，不刷屏。"""
+    async with get_database().session() as session:
+        movie = MediaItem(
+            kind="movie",
+            tmdb_id=603,
+            title="黑客帝国",
+            original_title="The Matrix",
+            year=1999,
+            aliases=[],
+        )
+        session.add(movie)
+        await session.commit()
+        movie_id = movie.id
+
+    info = ClientInfo(name="VidHub", device_name="iPad", device_id="dev-9", version="2.0")
+    meters = [
+        activity.register_stream(
+            device_id="dev-9",
+            kind=activity.STREAM_KIND_DOWNLOAD,
+            member_id=0,
+            unit=(movie_id, 0, 0),
+            file_id=7,
+            file_name="matrix.mkv",
+            size_bytes=20_000,
+            client=info,
+        )
+        for _ in range(3)
+    ]
+    for meter in meters:
+        meter.add(1_000)
+
+    data = client.get("/api/v1/playback/activity").json()["data"]
+    assert len(data["downloads"]) == 1
+    download = data["downloads"][0]
+    assert download["connections"] == 3
+    assert download["bytes_sent"] == 3_000
+    assert download["media"]["title"] == "黑客帝国"

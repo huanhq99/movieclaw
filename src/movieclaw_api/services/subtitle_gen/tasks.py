@@ -960,10 +960,15 @@ async def _run_generation_job(
     except translate.TranslationAborted as exc:
         if cancelled.is_set() or await context.cancel_requested():
             raise jobs.JobCancelled from exc
+        # 「重试」沿用任务创建时固定的模型（见 input_data.model_ref 的注释）：
+        # 模型本身就是失败原因时，重试只会原样再失败一次。把固定的模型写进
+        # 错误信息，并给出改默认模型的入口——改完重新发起生成即可换模型续译。
         raise jobs.JobFailed(
-            str(exc),
+            f"{exc}。当前任务固定使用模型 {model_ref or '默认模型'}；"
+            "换模型请改默认模型后重新发起生成，点「重试」仍会用原模型",
             code="SUBTITLE_TRANSLATION_ABORTED",
             actions=[
+                {"type": "open_settings", "label": "调整 AI 模型", "target": "llm"},
                 {"type": "retry_job", "label": "重试"},
                 {"type": "handoff_agent", "label": "交给 Agent"},
             ],
@@ -1216,6 +1221,7 @@ async def _run(
             ctx,
             target_language,
             secondary_language,
+            glossary=stats.glossary,
         )
         if compressed:
             final_events, report = validate.finalize_events(
@@ -1287,21 +1293,6 @@ async def _refresh_subtitle_inventory(db, file_id: int) -> None:  # noqa: ANN001
         await session.commit()
 
 
-def _subtitle_max_tokens(call: translate.ChatCall) -> int:
-    """按输出条数给结构化字幕留足空间，同时阻止模型无界思考。"""
-    if call.purpose == "glossary":
-        base, ceiling = 2048, 4096
-    elif call.purpose == "compress":
-        base = max(2048, 1024 + call.event_count * 100)
-        ceiling = 6144
-    else:
-        per_event = 180 if call.bilingual else 110
-        base = max(4096, 1024 + call.event_count * per_event)
-        ceiling = 12288 if call.bilingual else 8192
-    expanded = int(base * (1.5 ** max(0, call.attempt - 1)))
-    return min(ceiling, expanded)
-
-
 async def _build_chat(
     session: AsyncSession,
     *,
@@ -1334,8 +1325,13 @@ async def _build_chat(
     }
 
     async def chat(system: str, user: str, call: translate.ChatCall) -> str:
+        # 不设 max_tokens：让模型有多少写多少，交给供应商按剩余上下文兜底
+        # （与 agent 侧一致）。曾经按条数估算输出预算，结果是深度思考模型的
+        # 思考先烧光额度、译文 JSON 半截被 finish=length 截断（issue #194）。
+        # 上限并不省钱——被截断的响应照样全额计费却零可用产出，等于把「付一次
+        # 拿到一个块」换成「付三次什么都没有」。真正的成本闸门是块重试上限和
+        # 失败率熔断，它们按「块」计价，比按 token 猜一个数字可靠得多。
         settings = ModelSettings(
-            max_tokens=_subtitle_max_tokens(call),
             response_format="json_object" if kimi_fast_json else None,
             extra_body=({"thinking": {"type": "disabled"}} if kimi_fast_json else None),
         )
@@ -1421,7 +1417,12 @@ async def _build_chat(
             response.finish_reason,
         )
         if response.finish_reason == "length":
-            raise ValueError("模型输出达到长度上限，正在扩大预算后重试")
+            # 专属信号：翻译层据此把块对半拆开重译。原样重发只会再次被截断——
+            # 撞的是供应商天花板。深度思考模型是这里最常见的触发者。
+            raise translate.ChatOutputTruncated(
+                "模型写到自身输出上限仍未写完译文"
+                f"（本次思考+正文共 {response.usage.completion_tokens} tokens）"
+            )
         if response.finish_reason == "tool_calls":
             raise ValueError("字幕模型返回了意外的工具调用，正在重试结构化输出")
         return response.content or ""

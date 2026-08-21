@@ -391,7 +391,8 @@ async def test_subtitle_chat_uses_fast_kimi_json_mode_and_records_usage(monkeypa
     assert result == '{"items": []}'
     assert requests[0].settings.extra_body == {"thinking": {"type": "disabled"}}
     assert requests[0].settings.response_format == "json_object"
-    assert 4096 <= requests[0].settings.max_tokens <= 8192
+    # 不自设输出上限：截断的响应照样全额计费却零产出，上限护不住钱包
+    assert requests[0].settings.max_tokens is None
     snapshot = usage.snapshot()
     assert snapshot["request_count"] == 1
     assert snapshot["total_tokens"] == 200
@@ -529,6 +530,165 @@ async def test_translate_checkpoint_cannot_bypass_failure_fuse(tmp_path: Path, m
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     # 有界并发允许同一批调用一起完成，因此熔断最多产生一个并发窗口的超调。
     assert checkpoint["failed_blocks"] == list(range(translate.TRANSLATION_CONCURRENCY))
+
+
+async def test_translate_resume_retries_failed_blocks(tmp_path: Path, monkeypatch) -> None:
+    """换好模型后续传必须重译失败块，而不是一开跑就被历史失败数顶穿熔断。
+
+    issue #194：失败块存的是保留原文的占位，旧实现把它们当成已完成块跳过，
+    累计失败数又直接触发熔断 —— 任务永远停在「重试 22 秒即失败」。
+    """
+    monkeypatch.chdir(tmp_path)
+    events = _events(500)  # 10 块，熔断阈值 20% → 3 块起跳
+
+    async def flaky_chat(system: str, user: str, _call: translate.ChatCall) -> str:
+        if "找出其中反复出现的人名" in user:
+            return "[]"
+        block = _prompt_block(user)
+        if block[0]["i"] < 250:  # 前 5 块坏掉，足以触发熔断
+            return "不是 JSON"
+        return json.dumps([{"i": e["i"], "t": f"译{e['i']}"} for e in block])
+
+    with pytest.raises(translate.TranslationAborted):
+        await translate.translate_events(flaky_chat, events, CTX, "chs", file_id=40)
+    checkpoint_path = next((tmp_path / "data").rglob("*.checkpoint.json"))
+    failed = json.loads(checkpoint_path.read_text(encoding="utf-8"))["failed_blocks"]
+    assert failed, "熔断前应已把失败块记进断点"
+
+    retried: list[int] = []
+
+    async def fixed_chat(system: str, user: str, _call: translate.ChatCall) -> str:
+        if "找出其中反复出现的人名" in user:
+            raise AssertionError("术语表该从断点恢复")
+        block = _prompt_block(user)
+        retried.append(block[0]["i"] // 50)
+        return json.dumps([{"i": e["i"], "t": f"译{e['i']}"} for e in block])
+
+    out, stats = await translate.translate_events(fixed_chat, events, CTX, "chs", file_id=40)
+    assert set(failed) <= set(retried), "断点里的失败块必须被重新翻译"
+    assert stats.failed_blocks == 0 and stats.kept_original == 0
+    assert out[0][2] == "译0" and out[499][2] == "译499"
+    # 失败名单已销账：再续传不会白白重译已经成功的块
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8"))["failed_blocks"] == []
+
+
+async def test_translate_splits_block_when_output_truncated(tmp_path: Path, monkeypatch) -> None:
+    """撞上模型自身输出上限时立刻拆块，不浪费同尺寸重试。
+
+    管线不自设 max_tokens，截断即意味着撞的是供应商天花板 —— 那是确定性的，
+    同样条数重发必然再次截断，所以不该把块重试次数烧在原尺寸上。
+    """
+    monkeypatch.chdir(tmp_path)
+    sizes: list[int] = []
+
+    async def chat(system: str, user: str, _call: translate.ChatCall) -> str:
+        if "找出其中反复出现的人名" in user:
+            return "[]"
+        block = _prompt_block(user)
+        sizes.append(len(block))
+        if len(block) > 25:  # 整块写不完，半块才写得下
+            raise translate.ChatOutputTruncated("撞上模型输出上限")
+        return json.dumps([{"i": e["i"], "t": f"译{e['i']}"} for e in block])
+
+    out, stats = await translate.translate_events(chat, _events(50), CTX, "chs", file_id=41)
+
+    assert stats.failed_blocks == 0
+    assert len(out) == 50 and out[0][2] == "译0" and out[49][2] == "译49"
+    assert sizes == [50, 25, 25], "截断后应立刻拆块，而不是原尺寸再试两次"
+
+
+async def test_translate_split_recurses_within_depth_cap(tmp_path: Path, monkeypatch) -> None:
+    """供应商天花板很低时逐层再拆，但调用次数有硬上限。"""
+    monkeypatch.chdir(tmp_path)
+    sizes: list[int] = []
+
+    async def chat(system: str, user: str, _call: translate.ChatCall) -> str:
+        if "找出其中反复出现的人名" in user:
+            return "[]"
+        block = _prompt_block(user)
+        sizes.append(len(block))
+        if len(block) > 13:  # 只有拆两层后才写得下
+            raise translate.ChatOutputTruncated("撞上模型输出上限")
+        return json.dumps([{"i": e["i"], "t": f"译{e['i']}"} for e in block])
+
+    out, stats = await translate.translate_events(chat, _events(50), CTX, "chs", file_id=42)
+
+    assert stats.failed_blocks == 0 and len(out) == 50
+    # 50 → 25+25 → 各自 12+13，调用次数落在 1+2+4=7 次的封顶内
+    assert sizes == [50, 25, 12, 13, 25, 12, 13]
+    assert len(sizes) <= 1 + 2 + 4
+
+
+async def test_translate_gives_up_when_split_cap_exhausted(tmp_path: Path, monkeypatch) -> None:
+    """拆到底仍写不完就认输保留原文，不无限拆下去。"""
+    monkeypatch.chdir(tmp_path)
+    calls = {"n": 0}
+
+    async def chat(system: str, user: str, _call: translate.ChatCall) -> str:
+        if "找出其中反复出现的人名" in user:
+            return "[]"
+        calls["n"] += 1
+        raise translate.ChatOutputTruncated("再怎么拆都写不完")
+
+    with pytest.raises(translate.TranslationAborted):  # 1/1 失败率触发熔断
+        await translate.translate_events(chat, _events(50), CTX, "chs", file_id=43)
+    assert calls["n"] <= 1 + 2 + 4, "拆分深度必须有硬上限"
+
+
+def test_validate_block_rejects_non_integer_index() -> None:
+    """序号写成 null/数组是「结构不对」，要抛 ValueError 走块重试。
+
+    放任 TypeError 逃出去，一次畸形响应就会打死整个任务 —— 而块重试机制
+    存在的意义正是兜住模型的畸形输出。
+    """
+    block = [(0, "hello there my friend"), (1, "second line here ok")]
+    for raw in (
+        '[{"i": null, "t": "译0"}, {"i": 1, "t": "译1"}]',
+        '[{"i": [0], "t": "译0"}, {"i": 1, "t": "译1"}]',
+    ):
+        with pytest.raises(ValueError, match="不是整数"):
+            translate._validate_block(raw, block, "chs")
+
+
+def test_checkpoint_save_is_atomic(tmp_path: Path, monkeypatch) -> None:
+    """写盘中途崩溃不能毁掉已有断点 —— 那正是断点存在的理由。"""
+    monkeypatch.chdir(tmp_path)
+    checkpoint = translate.Checkpoint(7, "chs", "fp")
+    checkpoint.blocks = {0: ["译0"]}
+    checkpoint.save()
+
+    real_write_text = Path.write_text
+
+    def crash(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        real_write_text(self, *args, **kwargs)  # 临时文件已写出
+        raise OSError("磁盘写满")
+
+    monkeypatch.setattr(Path, "write_text", crash)
+    checkpoint.blocks[1] = ["译1"]
+    with pytest.raises(OSError):
+        checkpoint.save()
+    monkeypatch.setattr(Path, "write_text", real_write_text)  # 只撤销这一项，保留 chdir
+
+    reloaded = translate.Checkpoint(7, "chs", "fp")
+    reloaded.load()
+    assert reloaded.blocks == {0: ["译0"]}, "半截写入不能污染已落盘的断点"
+
+
+async def test_compress_overruns_keeps_glossary(tmp_path: Path, monkeypatch) -> None:
+    """二次压缩是对译文的改写，丢了术语表会让人名地名在这批行上跑偏。"""
+    monkeypatch.chdir(tmp_path)
+    systems: list[str] = []
+
+    async def chat(system: str, user: str, _call: translate.ChatCall) -> str:
+        systems.append(system)
+        return '{"items": []}'
+
+    events = [(0, 1000, "这一句明显读不完必须压缩改写才行的超长译文")]
+    await translate.compress_overruns(
+        chat, events, [0], CTX, "chs", None, glossary={"John": "约翰"}
+    )
+
+    assert systems and "John→约翰" in systems[0]
 
 
 async def test_translate_untranslated_block_detected(tmp_path: Path, monkeypatch) -> None:

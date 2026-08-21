@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from sqlmodel import select
+from tests.api.test_library_ingest import _stub_unit
 
 import movieclaw_api.services.library.ingest as ingest_mod
 from movieclaw_api.core.config import get_settings
@@ -120,9 +121,7 @@ async def test_auto_dir_routes_by_match_rules(db, tmp_path, monkeypatch):
     anime = await _make_item(db, title="某动画", year=2023, genre_ids=[16])
     drama = await _make_item(db, title="某日剧", year=2023, genre_ids=[18])
     monkeypatch.setattr(ingest_mod, "probe_media", lambda p: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     async def identify(session, kind, watch_root, main, spec):
         return anime if "某动画" in str(main) else drama
@@ -202,7 +201,7 @@ async def test_auto_claimed_entry_uses_pinned_library(db, tmp_path, monkeypatch)
         return [brief]
 
     monkeypatch.setattr(ingest_mod, "_downloader_briefs", briefs)
-    monkeypatch.setattr(ingest_mod, "_unit", lambda file, entry: (1, 1))
+    _stub_unit(monkeypatch, lambda file: (1, 1))
 
     entry = watch / "Cryptic.Anime.S01"
     entry.mkdir()

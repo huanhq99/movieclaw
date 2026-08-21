@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from sqlmodel import select
+from tests.api.test_library_ingest import _stub_unit
 
 import movieclaw_api.services.library.ingest as ingest_mod
 from movieclaw_api.core.config import get_settings
@@ -111,9 +112,7 @@ async def test_target_rule_transfers_without_library_ledger(db, tmp_path, monkey
     await _make_library(db, name="剧集库", root=tv_root)
     item = await _make_item(db, title="某日剧", year=2023)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda p: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     async def identify(session, kind, watch_root, main, spec):
         return item
@@ -194,7 +193,7 @@ async def test_target_rule_claimed_identity_keeps_wanted_open(db, tmp_path, monk
         return [brief]
 
     monkeypatch.setattr(ingest_mod, "_downloader_briefs", briefs)
-    monkeypatch.setattr(ingest_mod, "_unit", lambda file, entry: (1, 1))
+    _stub_unit(monkeypatch, lambda file: (1, 1))
 
     entry = watch / "Cryptic.Anime.S01"
     entry.mkdir()
@@ -343,9 +342,7 @@ async def test_target_rule_skips_units_already_in_library(db, tmp_path, monkeypa
         await session.commit()
 
     monkeypatch.setattr(ingest_mod, "probe_media", lambda p: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     async def identify(session, kind, watch_root, main, spec):
         return item

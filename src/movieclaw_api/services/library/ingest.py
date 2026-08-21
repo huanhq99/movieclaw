@@ -124,13 +124,11 @@ from movieclaw_api.services.library.layout import (
     IN_PROGRESS_MARKERS,
     VIDEO_EXTS,
     entry_base_name,
-    explicit_unit,
     is_disc_dir,
-    season_from_dir,
-    trailing_index_episode,
 )
 from movieclaw_api.services.library.resolve import verify_resolve
 from movieclaw_api.services.library.scan import guess_evidence
+from movieclaw_api.services.library.units import FileUnit, resolve_units
 from movieclaw_api.services.media_discover import get_tmdb_client
 from movieclaw_api.services.media_library import MediaLibraryService
 from movieclaw_api.services.media_probe import ffprobe_available, probe_media
@@ -146,6 +144,7 @@ from movieclaw_db.models import (
     LibraryFile,
     ManualDownloadIntent,
     MediaItem,
+    MediaSeason,
     NoticeSeverity,
     utcnow,
 )
@@ -181,7 +180,10 @@ _INGEST_COPY_CHUNK_BYTES = 64 * 1024 * 1024
 #     集号的线上病例），存量「解析不出集号」的挂起记录升级后自动补偿
 # v5：显式 E00（先导/特辑占位）不再误报「解析不出集号」钉住记录，按占位
 #     跳过并如实说明——含 E00 的季包不再每次都进待处理
-_INGEST_HANDLER_REVISION = "library.ingest.v5"
+# v6：季集号改为整批解析（library/units.py）——裸 E/EP 标记确定性出集号、
+#     季号按批次仲裁、推断季号过 TMDB 台账守卫。存量因 issue #185 挂起的
+#     「解析不出季号/集号」记录升级后自动补偿重跑
+_INGEST_HANDLER_REVISION = "library.ingest.v6"
 
 
 def _ingest_handler_revision() -> str:
@@ -1607,6 +1609,26 @@ async def _ingest_entry(
     assert staging is not None or (dest_library is not None and dest_library.id is not None)
 
     files = [main] if kind is MediaKind.MOVIE else list(snap.videos)
+    # 季集号按**整批**解析（设计见 library/units.py）：同一个包里的文件季号
+    # 必然相同，逐文件各猜各的会解出一堆互相矛盾的季号（issue #185：36 集
+    # 单季包散进 25 个不存在的季目录）。台账一并查好传进去，作为推断季号的
+    # 守卫——幻觉季在这里被挡住，绝不落盘建目录
+    units: dict[Path, FileUnit] = {}
+    if kind is not MediaKind.MOVIE:
+        known_seasons = set(
+            (
+                await session.execute(
+                    select(MediaSeason.season_number).where(
+                        MediaSeason.media_item_id == item.id
+                    )
+                )
+            ).scalars()
+        )
+        units = resolve_units(
+            files,
+            entry_name=entry.name if entry.is_dir() else entry.stem,
+            known_seasons=known_seasons,
+        )
     notes: list[str] = []
     # 逐文件的失败按性质分档：环境故障（探测失败/搬运出错）→ failed 退避
     # 重试；解析不出季集、目标同名冲突 → pending 等人（重试改变不了结果）
@@ -1633,9 +1655,10 @@ async def _ingest_entry(
         if kind is MediaKind.MOVIE:
             season, episode = 0, 0
         else:
-            season, episode = _unit(file, entry)
+            unit = units[file]
+            season, episode = unit.season, unit.episode
             if not episode:
-                if explicit_unit(file.stem) is not None:
+                if unit.explicit_pilot:
                     # 显式 E00：先导/特辑占位。集号 0 是管线的「无集号」哨兵，
                     # 按设计不自动入库；这不是解析缺口——重试和模型升级都改变
                     # 不了结果，不能把记录钉在待处理，如实说明后跳过即可
@@ -1647,7 +1670,11 @@ async def _ingest_entry(
                 completed_bytes += file.stat().st_size
                 continue
             if season is None:
-                notes.append(f"「{file.name}」解析不出季号，未入库")
+                # 台账守卫否决时补上具体原因——「解出第 36 季但 TMDB 没有这一季」
+                # 比含混的「解析不出季号」可操作得多。前半句原样保留：
+                # _PARSER_GAP_MARKERS 靠它识别解析缺口并在能力升级后自动补偿
+                because = f"（{unit.rejected_reason}）" if unit.rejected_reason else ""
+                notes.append(f"「{file.name}」解析不出季号，未入库{because}")
                 parser_gap = True
                 completed_bytes += file.stat().st_size
                 continue
@@ -2054,28 +2081,6 @@ async def _identify(
         )
     except Exception as exc:
         raise IdentifyUnavailable(f"TMDB 暂时不可达（{exc}）") from exc
-
-
-def _unit(file: Path, entry: Path) -> tuple[int | None, int]:
-    """剧集文件的季集号：显式 SxxEyy → 模型解析 → 父目录/条目名季号兜底。
-
-    季号三处都拿不到时返回 None（宁可跳过，不默认第 1 季错挂）；
-    显式 S00（特别篇）会被文件名解析正常带出，不走兜底。
-    """
-    # 显式 SxxEyy 标记语义确定，压过模型：模型漏抽时 seasons 里还可能混入
-    # 被错标成季号的集号数字（"S06E01" → seasons=[1,6]），不能再拿来兜底
-    explicit = explicit_unit(file.stem)
-    if explicit is not None:
-        return explicit
-    attrs = enrich(file.stem)
-    # 常规集号全灭时退回裸尾号兜底（「走向共和01」，与扫描器 _unit_for 同则）
-    episode = attrs.episodes[0] if attrs.episodes else (trailing_index_episode(file.stem) or 0)
-    season: int | None = attrs.seasons[0] if attrs.seasons else season_from_dir(file.parent)
-    if season is None:
-        entry_attrs = enrich(entry.name if entry.is_dir() else entry.stem)
-        entry_seasons = {s for s in entry_attrs.seasons}
-        season = entry_seasons.pop() if len(entry_seasons) == 1 else None
-    return season, episode
 
 
 # ---------------------------------------------------------------------------

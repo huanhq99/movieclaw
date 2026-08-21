@@ -65,7 +65,6 @@ from movieclaw_api.services.library.layout import (
     SCAN_VIDEO_EXTS,
     STRM_EXT,
     entry_dirs,
-    explicit_unit,
     season_from_dir,
     trailing_index_episode,
 )
@@ -81,6 +80,7 @@ from movieclaw_api.services.library.resolve import (
     resolve_with_candidates,
 )
 from movieclaw_api.services.library.subtitles import discover_external_subtitles_async
+from movieclaw_api.services.library.units import resolve_units
 from movieclaw_api.services.media_discover import get_tmdb_client
 from movieclaw_api.services.media_library import MediaLibraryService
 from movieclaw_api.services.media_probe import probe_media
@@ -3216,32 +3216,27 @@ def local_episode_count(directory: Path) -> int | None:
 
 
 def _unit_for(kind: MediaKind, file: Path) -> tuple[int, int]:
-    """期望单元：电影 (0,0)；剧集优先信分集 NFO，其次文件名，季号缺失看父目录。
+    """期望单元：电影 (0,0)；剧集优先信分集 NFO，其次走确定性季集解析层。
 
-    证据优先级（NAS 实测《妻子的浪漫旅行》第 9 季文件名同时含「第一季」
-    与 S09 两个季信号，整季错挂到第 1 季）：
+    证据优先级：
     1. 视频同名 NFO 的 <season>/<episode>——刮削器写盘的定位，最强证据；
-    2. 文件名解析：显式 SxxEyy 标记确定性解析、压过模型（模型对单集文件名
-       会漏抽集号，见 layout.explicit_unit）；模型解出多个互相矛盾的季号时，
-       父目录（Season 9）在候选中仲裁；
-    3. 常规集号（SxxExx/「第N集」）全灭时退回裸尾号兜底（「走向共和01」，
-       央视老剧惯例）——否则整目录几十集全坍缩成同一个 E0 单元。
+    2. ``units.resolve_units``：显式 SxxEyy → 裸 E/EP 标记 → 季目录 → 模型，
+       模型排在最后且带「季号 == 集号」幻觉指纹的去噪（见该模块 docstring）。
+       NAS 实测《妻子的浪漫旅行》第 9 季文件名同时含「第一季」与 S09 两个季
+       信号、整季错挂到第 1 季的病例，由「确定性来源压过模型」直接覆盖——
+       S09 是显式标记、Season 9 是目录声明，模型的「第一季」根本进不了决赛。
+
+    与监听导入的区别：这里逐文件走（库扫描按目录遍历，没有「包」的概念），
+    不传条目名与台账；季号求解失败时回落 0（特别季）——``library_file``
+    的季号列非空，扫描必须给出一个值。
     """
     if kind is MediaKind.MOVIE:
         return 0, 0
     episode_nfo = read_episode_metadata(file.with_suffix(".nfo"))
     if episode_nfo and episode_nfo.season is not None and episode_nfo.episode is not None:
         return episode_nfo.season, episode_nfo.episode
-    explicit = explicit_unit(file.stem)
-    if explicit is not None:
-        return explicit
-    attrs = enrich(file.stem)
-    episode = attrs.episodes[0] if attrs.episodes else (trailing_index_episode(file.stem) or 0)
-    dir_season = season_from_dir(file.parent)
-    if len(set(attrs.seasons)) > 1 and dir_season in attrs.seasons:
-        return dir_season, episode
-    season = attrs.seasons[0] if attrs.seasons else dir_season
-    return season if season is not None else 0, episode
+    unit = resolve_units([file])[file]
+    return unit.season if unit.season is not None else 0, unit.episode
 
 
 # ---------------------------------------------------------------------------

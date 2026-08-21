@@ -23,6 +23,7 @@ from movieclaw_api.core.config import get_settings
 from movieclaw_api.exceptions import BadRequestException
 from movieclaw_api.services import jobs
 from movieclaw_api.services.import_watch_config import ImportWatchConfigService
+from movieclaw_api.services.library.layout import explicit_unit
 from movieclaw_db.engine import dispose_db, get_database, init_db
 from movieclaw_db.migrations import run_migrations
 from movieclaw_db.models import (
@@ -125,6 +126,29 @@ def _stub_identify(monkeypatch, item):
         return item
 
     monkeypatch.setattr(ingest_mod, "_identify", identify)
+
+
+def _stub_unit(monkeypatch, parse):
+    """把「单文件 → (季号, 集号)」的桩接到批次解析器 resolve_units 上。
+
+    本文件的用例关心的是入库收口行为（幂等、部分入库、挂起补偿……），不是季集
+    解析本身——后者由 test_library_units.py 单独覆盖。所以这里继续按文件打桩，
+    由本 helper 适配成批次签名。``explicit_pilot`` 按显式 SxxEyy 标记还原真实
+    语义：集号 0 只有在文件名确实写了 E00 时才算先导占位，否则是解析缺口。
+    """
+
+    def resolve(files, **_kwargs):
+        units = {}
+        for file in files:
+            season, episode = parse(file)
+            units[file] = ingest_mod.FileUnit(
+                season=season,
+                episode=episode,
+                explicit_pilot=episode == 0 and explicit_unit(file.stem) is not None,
+            )
+        return units
+
+    monkeypatch.setattr(ingest_mod, "resolve_units", resolve)
 
 
 def _fixed_rule(watch, strategy="hardlink", library_id=None) -> ImportWatch:
@@ -313,9 +337,7 @@ async def test_ingest_job_reports_only_files_added_by_current_run(db, tmp_path, 
     item = await _make_item(db, kind=MediaKind.TV, title="某剧", year=2020)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, _entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     async def no_assets(_media_item_id: int) -> None:
         return None
@@ -466,9 +488,7 @@ async def test_tv_import_and_incremental_episodes(db, tmp_path, monkeypatch):
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda p: _FAKE_SPEC)
     # 季集解析依赖 NER 模型（测试环境缺失），按文件名打桩：epN.mkv → S01EN
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     entry = watch / "测试剧集 S01"
     entry.mkdir()
@@ -544,9 +564,7 @@ async def test_completed_files_are_ingested_while_same_torrent_keeps_downloading
     item = await _make_item(db, kind=MediaKind.TV, title="分批剧集", year=2026)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, _entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     entry = watch / "Partial.Show.S01"
     entry.mkdir()
@@ -629,7 +647,7 @@ async def test_completed_file_waits_when_another_torrent_still_writes_same_path(
     item = await _make_item(db, kind=MediaKind.TV, title="重叠剧集", year=2026)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(ingest_mod, "_unit", lambda _file, _entry: (1, 1))
+    _stub_unit(monkeypatch, lambda file: (1, 1))
 
     entry = watch / "Overlap.Show.S01"
     entry.mkdir()
@@ -710,9 +728,7 @@ async def test_completed_torrent_creates_file_scoped_job_while_sibling_downloads
     item = await _make_item(db, kind=MediaKind.TV, title="同目录剧集", year=2026)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, _entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     async def no_assets(_media_item_id: int) -> None:
         return None
@@ -825,7 +841,7 @@ async def test_file_scoped_blocked_job_not_woken_by_tree_fingerprint(db, tmp_pat
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
     # 已完成的 ep1 解析不出集号 → 批次作业以解析缺口挂起
-    monkeypatch.setattr(ingest_mod, "_unit", lambda _file, _entry: (1, 0))
+    _stub_unit(monkeypatch, lambda file: (1, 0))
 
     entry = watch / "Blocked.Batch.S01"
     entry.mkdir()
@@ -935,11 +951,7 @@ async def test_blocked_batch_does_not_stall_remaining_episodes(db, tmp_path, mon
 
     monkeypatch.setattr("movieclaw_api.services.media_scrape.ensure_assets", no_assets)
     # ep1 解析不出集号 → 第一批挂起；ep2 正常
-    monkeypatch.setattr(
-        ingest_mod,
-        "_unit",
-        lambda file, _entry: (1, 0) if file.stem == "ep1" else (1, 2),
-    )
+    _stub_unit(monkeypatch, lambda file: (1, 0) if file.stem == "ep1" else (1, 2))
 
     entry = watch / "Collateral.Show.S01"
     entry.mkdir()
@@ -1111,9 +1123,7 @@ async def test_probe_gate_applies_per_file(db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         ingest_mod, "probe_media", lambda p: None if "ep2" in str(p) else _FAKE_SPEC
     )
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     entry = watch / "测试剧集 S01"
     entry.mkdir()
@@ -1141,11 +1151,7 @@ async def test_partial_episode_parse_stays_pending(db, tmp_path, monkeypatch):
     item = await _make_item(db, kind=MediaKind.TV, title="测试剧集", year=2024)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod,
-        "_unit",
-        lambda file, _entry: (1, 1) if file.stem == "ep1" else (1, 0),
-    )
+    _stub_unit(monkeypatch, lambda file: (1, 1) if file.stem == "ep1" else (1, 0))
 
     entry = watch / "测试剧集 S01"
     entry.mkdir()
@@ -1176,7 +1182,7 @@ async def test_name_conflict_concludes_pending_not_failed(db, tmp_path, monkeypa
     item = await _make_item(db, kind=MediaKind.TV, title="测试剧集", year=2024)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(ingest_mod, "_unit", lambda _file, _entry: (1, 1))
+    _stub_unit(monkeypatch, lambda file: (1, 1))
 
     # 基础名与 1080p 退让名都已被不同内容占用（尺寸互不相同 → 非同一载荷）
     season_dir = root / "测试剧集 (2024)" / "Season 01"
@@ -1209,7 +1215,7 @@ async def test_name_conflict_with_same_tier_version_skips_as_imported(db, tmp_pa
     item = await _make_item(db, kind=MediaKind.TV, title="测试剧集", year=2024)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(ingest_mod, "_unit", lambda _file, _entry: (1, 1))
+    _stub_unit(monkeypatch, lambda file: (1, 1))
 
     # 两个名字都被不同内容占用，且 1080p 版本已入台账（同档在库）
     season_dir = root / "测试剧集 (2024)" / "Season 01"
@@ -1271,9 +1277,7 @@ async def test_subscription_extra_same_tier_file_not_imported_as_new_version(
     library_id = await _make_library(db, kind=MediaKind.TV, root=root)
     item = await _make_item(db, kind=MediaKind.TV, title="测试剧集", year=2024)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, _entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     async def identify_none(session, kind, watch_root, main, spec):
         return None
@@ -1409,7 +1413,7 @@ async def test_all_dup_skipped_still_closes_fulfilled_wanted(db, tmp_path, monke
     library_id = await _make_library(db, kind=MediaKind.TV, root=root)
     item = await _make_item(db, kind=MediaKind.TV, title="测试剧集", year=2024)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(ingest_mod, "_unit", lambda _file, _entry: (1, 1))
+    _stub_unit(monkeypatch, lambda file: (1, 1))
 
     async def identify_none(session, kind, watch_root, main, spec):
         return None
@@ -1497,9 +1501,7 @@ async def test_full_tree_import_cancels_stale_blocked_batches(db, tmp_path, monk
     item = await _make_item(db, kind=MediaKind.TV, title="测试剧集", year=2024)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, _entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     entry = watch / "测试剧集 S01"
     entry.mkdir()
@@ -1541,7 +1543,7 @@ async def test_upgrade_retries_legacy_partial_import_through_job(db, tmp_path, m
 
     parser_ready = False
 
-    def parse_unit(file, _entry):
+    def parse_unit(file):
         if file.stem == "ep1" or parser_ready:
             return 1, int(file.stem.removeprefix("ep"))
         return 1, 0
@@ -1549,7 +1551,7 @@ async def test_upgrade_retries_legacy_partial_import_through_job(db, tmp_path, m
     async def no_assets(_media_item_id: int) -> None:
         return None
 
-    monkeypatch.setattr(ingest_mod, "_unit", parse_unit)
+    _stub_unit(monkeypatch, parse_unit)
     monkeypatch.setattr("movieclaw_api.services.media_scrape.ensure_assets", no_assets)
 
     entry = watch / "测试剧集 S01"
@@ -1956,7 +1958,7 @@ async def test_upgrade_unblocks_old_revision_parser_gap_job(db, tmp_path, monkey
 
     parser_ready = False
 
-    def parse_unit(file, _entry):
+    def parse_unit(file):
         if file.stem == "ep1" or parser_ready:
             return 1, int(file.stem.removeprefix("ep"))
         return 1, 0
@@ -1964,7 +1966,7 @@ async def test_upgrade_unblocks_old_revision_parser_gap_job(db, tmp_path, monkey
     async def no_assets(_media_item_id: int) -> None:
         return None
 
-    monkeypatch.setattr(ingest_mod, "_unit", parse_unit)
+    _stub_unit(monkeypatch, parse_unit)
     monkeypatch.setattr("movieclaw_api.services.media_scrape.ensure_assets", no_assets)
 
     entry = watch / "补偿剧集 S01"
@@ -2027,7 +2029,7 @@ async def _make_blocked_parser_gap_job(db, tmp_path, monkeypatch, *, title: str)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
 
-    def parse_unit(file, _entry):
+    def parse_unit(file):
         if file.stem == "ep2":
             return 1, 0
         return 1, int(file.stem.removeprefix("ep"))
@@ -2035,7 +2037,7 @@ async def _make_blocked_parser_gap_job(db, tmp_path, monkeypatch, *, title: str)
     async def no_assets(_media_item_id: int) -> None:
         return None
 
-    monkeypatch.setattr(ingest_mod, "_unit", parse_unit)
+    _stub_unit(monkeypatch, parse_unit)
     monkeypatch.setattr("movieclaw_api.services.media_scrape.ensure_assets", no_assets)
 
     entry = watch / f"{title} S01"
@@ -2093,9 +2095,7 @@ async def test_model_upgrade_wakes_blocked_parser_gap_job(db, tmp_path, monkeypa
     model_dir.mkdir(parents=True)
     (model_dir / ".release-tag").write_text("torrent-ner-v9\n", encoding="utf-8")
     monkeypatch.setenv("MOVIECLAW_NER_DIR", str(model_dir))
-    monkeypatch.setattr(
-        ingest_mod, "_unit", lambda file, _entry: (1, int(file.stem.removeprefix("ep")))
-    )
+    _stub_unit(monkeypatch, lambda file: (1, int(file.stem.removeprefix("ep"))))
 
     await ingest_mod._sweep_dir(rule, library)
     completed = await _wait_job_status(job.id, JobStatus.SUCCEEDED)
@@ -2122,11 +2122,7 @@ async def test_compensation_zero_new_import_keeps_imported_summary(db, tmp_path,
     item = await _make_item(db, kind=MediaKind.TV, title="摘要剧集", year=2026)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod,
-        "_unit",
-        lambda file, _entry: (1, 1) if file.stem == "ep1" else (1, 0),
-    )
+    _stub_unit(monkeypatch, lambda file: (1, 1) if file.stem == "ep1" else (1, 0))
 
     entry = watch / "摘要剧集 S01"
     entry.mkdir()
@@ -2169,11 +2165,7 @@ async def test_staging_partial_import_not_auto_compensated(db, tmp_path, monkeyp
     item = await _make_item(db, kind=MediaKind.TV, title="中转剧集", year=2026)
     _stub_identify(monkeypatch, item)
     monkeypatch.setattr(ingest_mod, "probe_media", lambda _path: _FAKE_SPEC)
-    monkeypatch.setattr(
-        ingest_mod,
-        "_unit",
-        lambda file, _entry: (1, 1) if file.stem == "ep1" else (1, 0),
-    )
+    _stub_unit(monkeypatch, lambda file: (1, 1) if file.stem == "ep1" else (1, 0))
     async with db.session() as session:
         session.add(
             ImportWatch(

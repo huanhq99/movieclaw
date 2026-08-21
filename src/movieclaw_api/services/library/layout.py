@@ -104,6 +104,19 @@ _TRAILING_INDEX = re.compile(r"(?<![0-9A-Za-z])(\d{1,3})\s*$")
 # （"XS06E01"），后界挡住数字粘连（"S02E051080p" 宁可不中，交回模型通道）
 _EXPLICIT_SXXEYY = re.compile(r"(?i)(?<![0-9A-Za-z])S(\d{1,3})[ ._-]?E(\d{1,4})(?!\d)")
 
+# 裸 E/EP 集号标记（无 S 季号前缀）："Hikaru No Go.E01.2020..."、"...EP12..."。
+# 单季剧的种子极常见这么命名，而这种串**在信息论上根本不含季号**——模型只能
+# 幻觉（线上病例：E10 被同时标成季号与集号，整包散进 25 个不存在的季目录）。
+# 集号本身却是确定的，用正则拿下来即可，季号另由证据链求解。
+#
+# 前界只认真正的分隔符（不是"非字母数字"）：`[` 不算界，否则动漫文件名尾部的
+# CRC32 校验码 "[E5F1A2B3]" 会被读成 E5。后界挡数字粘连。可选的 P 收编 "EP01"
+# 写法——28024 条金标语料实测：召回从 936 涨到 1665，误命中恒为 7 条且逐条核对
+# 全是标注漏标的真集号（E204/E219/E07），真实误报为 0。允许 E 与数字间再夹一个
+# 分隔符的变体已否决：会把 "…no Anata e 2022…" 的年份、"…e 2nd Season…" 的季号
+# 吃成集号（误命中 7 → 22）。
+_EXPLICIT_EPISODE = re.compile(r"(?:^|[ ._\-])(?:[Ee][Pp]?)(\d{1,4})(?!\d)")
+
 
 def trailing_index_episode(stem: str) -> int | None:
     """裸尾号命名声明的集号；解析不出（或为 0）返回 None。
@@ -131,6 +144,21 @@ def explicit_unit(stem: str) -> tuple[int, int] | None:
     if match is None:
         return None
     return int(match.group(1)), int(match.group(2))
+
+
+def explicit_episode(stem: str) -> int | None:
+    """文件名裸 E/EP 标记声明的集号；没有该标记或标记自相矛盾时返回 None。
+
+    只出集号、不猜季号——这正是它与 ``explicit_unit`` 的分工：``E01`` 里没有
+    季号信息，硬猜就是幻觉。季号交给 ``units.resolve_units`` 的证据链。
+
+    同一个名字里解出多个不同的 E 号（"EP01-EP04" 这类区间/合集写法）视为歧义
+    返回 None：宁可交回上层挂起等人，也不从区间里随手挑一个。E00 原样返回 0，
+    与 ``explicit_unit`` 同口径（0 是管线的「无集号」哨兵，上层据此按先导/
+    特辑占位跳过，而不是误报解析失败）。
+    """
+    values = {int(match.group(1)) for match in _EXPLICIT_EPISODE.finditer(stem)}
+    return values.pop() if len(values) == 1 else None
 
 
 def season_from_dir(directory: Path) -> int | None:

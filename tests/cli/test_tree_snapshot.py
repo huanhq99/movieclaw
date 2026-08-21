@@ -33,6 +33,10 @@ KNOWN_NON_GENERATED = {
     "ui.library.files.thumb",
     "ui.library.items.ids",
     "ui.library.items.index",
+    # 活动页「观看」视角专用：实时快照是给界面每 8 秒轮询的进程内读数，
+    # CLI 取一次静态截面没有意义；设备注销是界面上就地处置的运维动作。
+    "playback.activity",
+    "playback.device.revoke",
     # 精选命令负责 preview → --yes 工作流，底层两段接口不直接进入命令树。
     "workflow.library.organize-files.preview",
     "workflow.library.organize-files.start",

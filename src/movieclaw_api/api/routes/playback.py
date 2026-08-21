@@ -69,7 +69,9 @@ async def get_media_activity(
     summary="注销播放器设备",
     operation_id="playback.device.revoke",
     dependencies=[Depends(require_admin)],
-    openapi_extra={"x-cli-hidden": True},
+    # confirm 而非 destructive：注销会中断该设备正在进行的播放/下载并要求重新
+    # 登录，但不销毁任何数据——观看进度、收藏按成员保存，与设备无关。
+    openapi_extra={"x-cli-hidden": True, "x-cli-dangerous": "confirm"},
 )
 async def revoke_playback_device(
     device_id: Annotated[str, Path(min_length=1, max_length=256)],

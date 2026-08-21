@@ -9,6 +9,7 @@ import { ActivityIcon } from "@/components/icons";
 import { MediaActivityPanel, useMediaActivity } from "@/components/media-activity-section";
 import { TaskCenterView } from "@/components/task-center-view";
 import { usePageChrome } from "@/lib/page-chrome";
+import { usePermissions } from "@/lib/permissions";
 import type { ActivityScope, TaskCenterViewName } from "@/lib/task-center";
 import { useIsMobile } from "@/lib/use-media-query";
 
@@ -34,8 +35,13 @@ export function ActivityView({
   const pathname = usePathname();
   const [scope, setScope] = useState<ActivityScope>(initialScope);
   const [view, setView] = useState<TaskCenterViewName>(initialView);
-  // 观看视角常驻轮询：切到任务视角时停掉，避免看不见的页签持续拉取
-  const mediaActivity = useMediaActivity(scope === "media");
+  // 轮询按**权限**门控，不按视角：「观看」旁的实时圆点要在任务视角也能亮——
+  // 那正是它存在的意义（你在处理任务时一眼看到家里有人在播）；只在观看视角
+  // 轮询的话，圆点只有在你已经盯着播放卡片时才亮，等于没用。
+  // 与 download-tasks / jobs 两个 Provider 同一套门控口径：接口是管理员专属，
+  // 成员直接访问本页不该拉出一条 403 报错。
+  const { isAdmin } = usePermissions();
+  const mediaActivity = useMediaActivity(isAdmin);
 
   /** 视角与状态都反映到 URL，保证刷新和分享后落回同一处。 */
   const syncUrl = useCallback(
@@ -62,6 +68,14 @@ export function ActivityView({
     },
     [syncUrl],
   );
+
+  // 浏览器前进/后退会改写查询串但不重挂载本组件，这里把视角同步回 URL 表达的
+  // 状态。自身 switchScope/changeView 触发的 replace 会带来完全相同的值，
+  // setState 同值不会引起额外渲染，因此不会和用户操作打架。
+  useEffect(() => {
+    setScope(initialScope);
+    setView(initialView);
+  }, [initialScope, initialView]);
 
   const liveCount =
     mediaActivity.snapshot.sessions.length + mediaActivity.snapshot.downloads.length;

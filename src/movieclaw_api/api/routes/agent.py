@@ -90,7 +90,7 @@ _PAGE_ROUTES: list[tuple[str, str]] = [
         "/library/{库ID}/item/{条目ID}",
         "库内条目详情（条目 ID 来自 library items list）",
     ),
-    ("/tasks", "任务中心（后台作业、下载任务的统一观察页）"),
+    ("/activity", "活动页（观看：实时播放/下载；任务：后台作业与下载任务）"),
     ("/sessions/{会话ID}", "AI 会话详情（ID 来自 session list/start）"),
     ("/people/{影人ID}", "影人档案（ID 来自 people 域）"),
     ("/settings", "设置页"),

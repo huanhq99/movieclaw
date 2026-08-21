@@ -398,8 +398,10 @@ def test_page_routes_match_web_app_pages() -> None:
 
     declared = {normalize(pattern) for pattern, _ in _PAGE_ROUTES}
 
-    # /settings 子分区由 /settings 兜底，不逐项写进提示词路由表
-    exempt = {"/settings/*"}
+    # /settings 子分区由 /settings 兜底，不逐项写进提示词路由表；
+    # /tasks 是重构为 /activity 后保留的重定向壳（保住旧收藏与站内深链），
+    # 不是可导航的页面，不该出现在给模型的路由表里
+    exempt = {"/settings/*", "/tasks"}
 
     ghosts = declared - fs_routes
     assert not ghosts, f"路由表声明了前端不存在的页面：{sorted(ghosts)}"

@@ -15,6 +15,10 @@ class EgressServiceOption(BaseModel):
     id: str
     label: str
     description: str = ""
+    testable: bool = Field(
+        default=True,
+        description="是否可在网络设置页对固定目标做连通性测试",
+    )
 
 
 class NetworkConfigPayload(BaseModel):
@@ -61,7 +65,8 @@ class NetworkTestPayload(BaseModel):
     service: str = Field(
         min_length=1,
         max_length=100,
-        description="要测试连通性的服务 id：tmdb / image / douban / llm / site:<站点id>",
+        description="要测试连通性的服务 id：tmdb / image / douban / llm / telegram / "
+        "discord / github / site:<站点id>",
     )
 
 

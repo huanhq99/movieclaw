@@ -17,6 +17,8 @@ export interface EgressServiceOption {
   id: string;
   label: string;
   description: string;
+  /** 是否有固定目标可在本页测试；Webhook 等动态目标需在各自设置页测试。 */
+  testable: boolean;
 }
 
 /** 代理模式：off 全部直连 / env 跟随环境变量 / manual 手动填写。 */

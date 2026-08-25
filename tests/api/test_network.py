@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from movieclaw_api.core.config import get_settings
+from movieclaw_api.services import network_config
 from movieclaw_api.services.auth import reset_auth_state
 from movieclaw_api.services.media_discover import reset_media_service
 from movieclaw_api.services.network_egress import reset_network_egress
@@ -58,7 +60,20 @@ def test_get_config_returns_defaults_and_catalog(client):
     assert data["proxy_mode"] == "env"
     assert sorted(data["proxy_services"]) == ["github", "image", "tmdb"]
     service_ids = [item["id"] for item in data["services"]]
-    assert {"tmdb", "image", "douban", "llm", "github"} <= set(service_ids)
+    assert {
+        "tmdb",
+        "image",
+        "douban",
+        "llm",
+        "telegram",
+        "discord",
+        "webhook",
+        "github",
+    } == set(service_ids)
+    service_options = {item["id"]: item for item in data["services"]}
+    assert service_options["telegram"]["testable"] is True
+    assert service_options["discord"]["testable"] is True
+    assert service_options["webhook"]["testable"] is False
     # 镜像默认值供前端 placeholder 展示
     assert data["mirror_defaults"]["tmdb_api_base_url"].startswith("http")
 
@@ -133,6 +148,48 @@ def test_save_rejects_bad_mirror_url(client):
 def test_test_endpoint_rejects_unknown_service(client):
     resp = client.post("/api/v1/network/test", json={"service": "nope"})
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("service", "expected_url", "status_code", "message"),
+    [
+        ("telegram", "https://api.telegram.org/", 302, "Telegram Bot API"),
+        ("discord", "https://discord.com/api/v10/gateway", 200, "Discord Gateway"),
+    ],
+)
+def test_notification_service_probe_uses_public_endpoint(
+    client, monkeypatch, service, expected_url, status_code, message
+):
+    """通知通道的网络测试必须与真实客户端走同一个服务标签。"""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status_code, request=request)
+
+    monkeypatch.setattr(
+        network_config,
+        "egress_transport",
+        lambda actual_service, **kwargs: (
+            httpx.MockTransport(handler)
+            if actual_service == service and kwargs == {"use_breaker": False}
+            else pytest.fail(f"错误的出口参数：{actual_service}, {kwargs}")
+        ),
+    )
+
+    resp = client.post("/api/v1/network/test", json={"service": service})
+
+    assert resp.status_code == 200
+    result = resp.json()["data"]
+    assert result["ok"] is True
+    assert message in result["message"]
+    assert [str(request.url) for request in requests] == [expected_url]
+
+
+def test_webhook_probe_requires_concrete_endpoint(client):
+    resp = client.post("/api/v1/network/test", json={"service": "webhook"})
+    assert resp.status_code == 400
+    assert "具体端点" in resp.json()["message"]
 
 
 def test_test_endpoint_llm_unconfigured(client):

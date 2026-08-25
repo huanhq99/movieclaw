@@ -13,6 +13,7 @@ import {
   GearIcon,
   GlobeIcon,
   PaletteIcon,
+  PlayIcon,
   SendIcon,
   ServerIcon,
   ShieldIcon,

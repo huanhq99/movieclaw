@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,6 +27,14 @@ from movieclaw_scheduler import SchedulerConfig, get_scheduler, init_scheduler
 from movieclaw_tracker import load_all_sites
 
 logger = logging.getLogger("movieclaw_api.lifespan")
+
+
+async def _warm_hardware_probe(probe) -> None:  # noqa: ANN001
+    """后台预热硬件自检。失败只影响档位判定（退回软件转码），不阻断启动。"""
+    try:
+        await probe()
+    except Exception:  # noqa: BLE001
+        logger.warning("硬件加速自检未能完成，按「无可用硬件」处理", exc_info=True)
 
 
 async def _reset_stale_verifying() -> None:
@@ -210,6 +219,19 @@ def build_lifespan(settings: Settings):
         from movieclaw_api.services.subtitle_gen import tasks as subtitle_tasks  # noqa: F401
 
         await init_job_dispatcher()
+        # 网页播放器的转码会话：先清上次退出遗留的分片目录（会话状态只在内存，
+        # 目录里的任何东西都是垃圾——不能假设上次是干净退出的），再起心跳巡检。
+        from movieclaw_api.services.playback.session import get_session_manager
+
+        transcode_sessions = get_session_manager()
+        await asyncio.to_thread(transcode_sessions.cleanup_orphans)
+        transcode_sessions.start_reaper()
+        # 硬件加速自检放后台预热：逐个后端真跑一秒编码要几秒钟，不该拖慢启动；
+        # 但也不能等到第一次播放才做——那会让首帧白等。异常吞掉，探测失败
+        # 只意味着「按软件转码处理」，不该阻断应用启动。
+        from movieclaw_api.services.playback.hwprobe import probe_backends_async
+
+        asyncio.create_task(_warm_hardware_probe(probe_backends_async))
         logger.info("应用启动完成，数据库就绪")
         try:
             yield
@@ -217,6 +239,10 @@ def build_lifespan(settings: Settings):
             from movieclaw_jellyfin.udp import stop_discovery
 
             stop_discovery()
+            # 转码会话最先停：ffmpeg 起在独立进程组里，后端退出前必须 killpg
+            # 整组，否则会留下满负荷烧 GPU、持续写盘的孤儿进程（§4.2 契约 3）。
+            # entrypoint.sh 的 trap 只 kill 后端自己，不会连坐孙子进程。
+            await get_session_manager().shutdown()
             # 先停媒体库监听（观察者线程持有事件循环引用，须在循环关闭前退出）
             from movieclaw_api.services.library.ingest import close_ingest_watcher
             from movieclaw_api.services.library.watch import close_library_watcher

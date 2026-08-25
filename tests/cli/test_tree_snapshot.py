@@ -36,7 +36,41 @@ KNOWN_NON_GENERATED = {
     # 活动页「观看」视角专用：实时快照是给界面每 8 秒轮询的进程内读数，
     # CLI 取一次静态截面没有意义；设备注销是界面上就地处置的运维动作。
     "playback.activity",
+    # 网页播放器：入参是浏览器实测的解码能力快照，取流靠签名 URL 直喂
+    # <video>/hls.js，CLI 无从构造也无从消费
+    "playback.decide",
+    # 播放页条目信息/分集清单（§6.10 路由只带 media_item_id）：纯播放器 UI
+    # 数据源，条目查询 CLI 走 library.items.get 那套
+    "playback.item.info",
+    "playback.item.episodes",
+    "playback.session.start",
+    "playback.session.ping",
+    "playback.session.stop",
+    "playback.session.playlist",
+    "playback.session.segment",
+    # VOD（§12）：master 列表与字幕子列表都是播放器取流端点，CLI 不生成
+    "playback.session.master",
+    "playback.session.subtitle-playlist",
+    "playback.file.stream",
+    "playback.file.subtitle",
+    "playback.file.fonts",
+    "playback.file.font",
+    "playback.hardware.probe",
+    "playback.file.trickplay",
+    "playback.file.trickplay.sheet",
+    "playback.metric.report",
+    # 客户端日志上报：播放器故障现场的内部链路，CLI 手动报一条没有意义
+    "playback.client-log",
+    "playback.stats",
     "playback.device.revoke",
+    # 观看进度上报与续播点：播放器起播/心跳/退出时自动调用的内部链路，
+    # CLI 手动上报一次进度没有意义。
+    "playback.progress",
+    "playback.resume",
+    # 播放策略：由「设置 → 播放」页与播放时的同意弹窗承载。整个 playback 域
+    # 都是网页播放器专用，不为两个开关新开一个 CLI 域。
+    "playback.policy.show",
+    "playback.policy.set",
     # 精选命令负责 preview → --yes 工作流，底层两段接口不直接进入命令树。
     "workflow.library.organize-files.preview",
     "workflow.library.organize-files.start",

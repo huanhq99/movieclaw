@@ -526,6 +526,39 @@ _MEMBER_ALLOWLIST = {
     ("GET", "/api/v1/libraries/{library_id}/items/{media_item_id}/episodes"),
     # 最近观看是按成员隔离的个人播放数据，并继续受媒体库白名单过滤。
     ("GET", "/api/v1/playback/recent"),
+    # 播放页条目信息/分集清单：按可见库解析归属，不可见与不存在同样 404
+    ("GET", "/api/v1/playback/items/{media_item_id}"),
+    ("GET", "/api/v1/playback/items/{media_item_id}/episodes"),
+    # 播放决策：成员当然要能放片。结果按请求里的可见库过滤，
+    # 不可见库的文件一律 404；软件转码开关是全局设置，成员只会拿到
+    # can_self_enable=false 的说明，改不了配置。
+    ("POST", "/api/v1/playback/decide"),
+    # 会话是私人资源：get/ping/stop 都按 member_id 校验归属，成员之间互相看不见。
+    ("POST", "/api/v1/playback/sessions"),
+    ("POST", "/api/v1/playback/sessions/{session_id}/ping"),
+    ("DELETE", "/api/v1/playback/sessions/{session_id}"),
+    # 取流端点不挂登录依赖（<video src> 带不了 header），改用签名 token；
+    # 无 token 或 token 不符一律 404，与「不存在」不可区分。
+    ("GET", "/api/v1/playback/sessions/{session_id}/index.m3u8"),
+    # master 列表与字幕媒体列表和 index.m3u8 完全同构：同样不挂登录依赖
+    # （iOS 原生 HLS 的请求也带不了 header），同样用签名 token 校验归属。
+    ("GET", "/api/v1/playback/sessions/{session_id}/master.m3u8"),
+    ("GET", "/api/v1/playback/sessions/{session_id}/sub{index}.m3u8"),
+    ("GET", "/api/v1/playback/sessions/{session_id}/{name}"),
+    ("GET", "/api/v1/playback/files/{file_id}/stream"),
+    ("GET", "/api/v1/playback/files/{file_id}/subtitles"),
+    ("GET", "/api/v1/playback/files/{file_id}/fonts"),
+    ("GET", "/api/v1/playback/files/{file_id}/fonts/{name}"),
+    ("GET", "/api/v1/playback/files/{file_id}/trickplay"),
+    ("GET", "/api/v1/playback/files/{file_id}/trickplay/{name}"),
+    # 质量上报是成员使用面：每个人看的片各自统计，汇总只有管理员能读
+    ("POST", "/api/v1/playback/metrics"),
+    # 客户端日志上报同理：成员的播放器出问题也要能报现场（只记日志不落库）
+    ("POST", "/api/v1/playback/client-log"),
+    # 观看进度与续播点是按成员隔离的个人数据，且只认可见库里的播放单元
+    # （不可见的单元一律 404，与"不存在"不可区分）。
+    ("POST", "/api/v1/playback/progress"),
+    ("GET", "/api/v1/playback/resume"),
     # 搜索历史：个人数据；统一结果端点再按记录类型检查对应能力。
     ("GET", "/api/v1/search/history"),
     ("GET", "/api/v1/search/history/{history_id}/results"),
@@ -571,10 +604,13 @@ _PATH_DUMMIES = {
     "{entry_id}": "1",
     "{file_id}": "1",
     "{device_id}": "no-such-device",
+    "{name}": "seg00000.m4s",
     "{token_id}": "1",
     "{notice_id}": "1",
     "{run_id}": "test-run",
     "{session_id}": "test-session",
+    # 字幕媒体列表的路径参数嵌在文件名里（.../sub{index}.m3u8）
+    "{index}": "0",
     "{day}": "2026-01-01",
     "{path}": "1/poster.jpg",
     "{challenge_id}": "test-challenge",

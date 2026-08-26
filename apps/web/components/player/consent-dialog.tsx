@@ -37,7 +37,13 @@ export function ConsentDialog({
     setSaving(true);
     setError(null);
     try {
-      await savePlaybackPolicy({ software_transcode_enabled: true });
+      const saved = await savePlaybackPolicy({ software_transcode_enabled: true });
+      // 保存接口回显的就是落库后的取值：不是 true 说明开关根本没生效，此时
+      // 绝不能 onGranted——重新决策还会弹回同一个窗，用户只会觉得「点了没
+      // 反应」。把失败明确说出来，让人知道该去查什么。
+      if (!saved.software_transcode_enabled) {
+        throw new Error("软件转码开关保存后未生效，请刷新页面重试或查看服务端日志");
+      }
       onGranted();
     } catch (err) {
       setError(err instanceof Error ? err.message : "开启失败，请稍后重试");
@@ -47,11 +53,17 @@ export function ConsentDialog({
 
   return (
     // role=dialog 兼具语义与 media-controller 的自动淡出豁免（它的隐藏规则
-    // 明确跳过 [role=dialog]）——等用户拍板的弹窗绝不能自己隐身
+    // 明确跳过 [role=dialog]）——等用户拍板的弹窗绝不能自己隐身。
+    //
+    // pointer-events-auto 必须显式写（2026-08-26 用户反馈「确认按钮点着没反应」
+    // 的根因）：media-chrome 的浮层容器是 pointer-events:none，靠
+    // `::slotted(...)` 规则给子元素恢复命中，但那条规则**同样明确跳过
+    // [role=dialog]**（media-container 的样式表里两处豁免是同一个选择器）。
+    // 不自己声明的话整个弹窗继承 none——看得见、点不中，点击穿透到画面上。
     <div
       role="dialog"
       aria-modal="true"
-      className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 px-6"
+      className="pointer-events-auto absolute inset-0 z-30 flex items-center justify-center bg-black/75 px-6"
     >
       {/* 面板外观照抄站内 Modal（components/modal.tsx）：同一个圆角、描边、
           底色与投影——它就是一个模态，不该长得像另一套系统 */}

@@ -53,6 +53,21 @@ def test_manual_mode_routes_only_enabled_services():
     assert resolve_proxy_url("site:chdbits") is None
 
 
+def test_notification_services_follow_individual_proxy_switches():
+    """通知服务共享出口实现，但每个服务标签必须能独立选择代理。"""
+    proxy_url = "http://192.168.1.2:7890"
+    apply_egress_config(
+        EgressConfig(
+            proxy_mode=ProxyMode.MANUAL,
+            proxy_url=proxy_url,
+            proxy_services=frozenset({"telegram", "webhook"}),
+        )
+    )
+    assert resolve_proxy_url("telegram") == proxy_url
+    assert resolve_proxy_url("webhook") == proxy_url
+    assert resolve_proxy_url("discord") is None
+
+
 def test_env_mode_reads_environment(monkeypatch):
     monkeypatch.delenv("ALL_PROXY", raising=False)
     monkeypatch.setenv("HTTPS_PROXY", "http://10.0.0.1:8080")

@@ -294,6 +294,7 @@ export function NetworkConfigSection() {
               backdrop={backdrop}
               enabled={form.proxy_services.includes(service.id)}
               toggleDisabled={!proxyActive}
+              testable={service.testable}
               test={tests[service.id]}
               onTest={() => runTest(service.id)}
               onToggle={() =>
@@ -325,6 +326,7 @@ export function NetworkConfigSection() {
                 backdrop={backdrop}
                 enabled={form.proxy_services.includes(service.id)}
                 toggleDisabled={!proxyActive}
+                testable={service.testable}
                 test={tests[service.id]}
                 onTest={() => runTest(service.id)}
                 onToggle={() =>
@@ -456,6 +458,7 @@ function ServiceRow({
   backdrop,
   enabled,
   toggleDisabled,
+  testable,
   test,
   onTest,
   onToggle,
@@ -467,6 +470,8 @@ function ServiceRow({
   enabled: boolean;
   /** 无可用代理时禁用开关（拨了也不生效）；测试不受影响——直连也值得测 */
   toggleDisabled: boolean;
+  /** 动态目标（如 Webhook）必须到对应设置页对具体 endpoint 测试。 */
+  testable: boolean;
   test: TestState | undefined;
   onTest: () => void;
   onToggle: () => void;
@@ -495,14 +500,18 @@ function ServiceRow({
             </span>
           </Tooltip>
         )}
-        <button
-          type="button"
-          onClick={onTest}
-          disabled={pending}
-          className="btn-glass px-3 py-1.5 text-sub font-medium disabled:opacity-40"
-        >
-          测试
-        </button>
+        {testable ? (
+          <button
+            type="button"
+            onClick={onTest}
+            disabled={pending}
+            className="btn-glass px-3 py-1.5 text-sub font-medium disabled:opacity-40"
+          >
+            测试
+          </button>
+        ) : (
+          <span className="text-caption text-[var(--text-faint)]">按具体端点测试</span>
+        )}
         {/* 与搜索/站点/下载器设置同款的受控 WebGL 液态玻璃开关 */}
         <LiquidGlassButton
           backgroundImage={backdrop}

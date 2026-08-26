@@ -19,7 +19,7 @@ from movieclaw_api.settings.base import SettingSchema, register_setting
 
 # 服务标签目录：设置页开关列表的固定部分（PT 站条目按已配置站点动态生成）。
 # label 面向用户展示，代码内一律用 id。
-BUILTIN_EGRESS_SERVICES: list[dict[str, str]] = [
+BUILTIN_EGRESS_SERVICES: list[dict[str, str | bool]] = [
     {
         "id": "tmdb",
         "label": "TMDB 元数据",
@@ -47,6 +47,8 @@ BUILTIN_EGRESS_SERVICES: list[dict[str, str]] = [
         "label": "事件 Webhook",
         "description": "向外部服务推送播放、收藏等事件；目标多在内网，"
         "endpoint 可单独选择直连（默认）或走代理",
+        # Webhook 没有统一公网目标，必须对用户配置的具体 endpoint 发送测试。
+        "testable": False,
     },
     {
         "id": "github",

@@ -184,6 +184,16 @@ async def _probe_target(service: str, session: AsyncSession) -> tuple[str, dict[
         if user_agent:
             headers["User-Agent"] = user_agent
         return f"{base.rstrip('/')}/models", headers
+    if service == "telegram":
+        # Bot API 根地址不需要 token，既能验证代理线路，又不会发送消息或泄露凭证。
+        return "https://api.telegram.org/", {}
+    if service == "discord":
+        # Gateway discovery 无需鉴权，与 Discord bot 的请求同域。
+        return "https://discord.com/api/v10/gateway", {}
+    if service == "webhook":
+        raise BadRequestException(
+            "Webhook 没有统一的探测目标，请到「设置 → Webhook」对具体端点发送测试"
+        )
     if service == "github":
         # 与应用内更新的检查请求同源（api.github.com 或 UPDATE_API_BASE_URL 反代）
         settings = get_settings()
@@ -214,6 +224,10 @@ def _classify_probe(service: str, status_code: int) -> NetworkTestResult:
         else:
             message = f"网络连通（HTTP {status_code}）"
         return NetworkTestResult(ok=True, message=message)
+    if service == "telegram":
+        return NetworkTestResult(ok=True, message="网络连通，可访问 Telegram Bot API")
+    if service == "discord":
+        return NetworkTestResult(ok=True, message="网络连通，可访问 Discord Gateway")
     if service == "llm":
         if status_code == 200:
             message = "网络连通，API Key 有效"
